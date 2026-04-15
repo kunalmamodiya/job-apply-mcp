@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyd
+
+# Virtual environment
+.venv/
+
+# Distribution / packaging
+.Python
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+*.whl
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local secrets and config
+.env
+.env.*
+*.env
+
+# Playwright artifacts
+playwright-report/
+
+# Local SQLite DB or session data
+*.db
+*.sqlite
+
+# Ignore npm / yarn temp files if present
+node_modules/
+
+# Ignore temporary files
+*.log
+
+# Ignore test artifacts
+.coverage
+coverage.xml
+htmlcov/
+pytest_cache/
+
+# Ignore macOS folder attributes
+.AppleDouble
+.LSOverride
