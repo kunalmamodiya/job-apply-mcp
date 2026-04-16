@@ -15,9 +15,58 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+from datetime import datetime, timezone
+
 from config import load_config
 from tools.profile import PROFILE, compute_match_score, should_exclude
 from tools.session import load_cookies
+
+
+def _parse_days_ago(text: str) -> int:
+    """
+    Parse posting age from various formats:
+      "3 days ago", "1 week ago", "2 weeks ago", "1 month ago",
+      "Few hours ago", "Just now", "Today", "30+ days ago"
+    Returns days as int, or -1 if unparseable.
+    """
+    if not text:
+        return -1
+    t = text.lower().strip()
+    if any(w in t for w in ("just now", "today", "few hours", "hour ago", "hours ago", "moment")):
+        return 0
+    m = re.search(r"(\d+)\s*day", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d+)\s*week", t)
+    if m:
+        return int(m.group(1)) * 7
+    m = re.search(r"(\d+)\s*month", t)
+    if m:
+        return int(m.group(1)) * 30
+    if "yesterday" in t:
+        return 1
+    return -1
+
+
+def _date_to_days_ago(date_str: str) -> int:
+    """Parse an ISO/epoch date string and return days ago. Returns -1 on failure."""
+    if not date_str:
+        return -1
+    try:
+        # Naukri uses "DD MMM YYYY" like "14 Apr 2026"
+        dt = datetime.strptime(date_str.strip(), "%d %b %Y")
+        delta = datetime.now() - dt
+        return max(0, delta.days)
+    except Exception:
+        pass
+    try:
+        # Try ISO format
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - dt
+        return max(0, delta.days)
+    except Exception:
+        pass
+    return -1
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +84,7 @@ class JobResult:
     match_score: float
     platform: str
     description: str = ""
+    posted_days_ago: int = -1  # -1 means unknown
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -206,6 +256,14 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
             if job.get("companyApplyJob", False):
                 continue  # skip external "Apply on company site"
 
+            # --- Filter: skip jobs older than 30 days ---
+            created = job.get("createdDate", "")
+            days_ago = _parse_days_ago(created) if created else -1
+            if days_ago == -1:
+                days_ago = _date_to_days_ago(created)
+            if days_ago > 30:
+                continue
+
             title = job.get("title", "")
             company = job.get("companyName", "")
             jd_url = job.get("jdURL", "")
@@ -238,6 +296,7 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
                     match_score=score,
                     platform="naukri",
                     description=description[:200],
+                    posted_days_ago=days_ago,
                 ))
     except Exception as exc:
         logger.error("Naukri scrape error: %s", exc)
@@ -740,11 +799,13 @@ async def search_jobs(
 def filter_jobs(
     jobs: list[dict[str, Any]],
     min_match_score: float = 0.7,
+    max_days_old: int = 30,
 ) -> list[dict[str, Any]]:
     """
     Filter and rank jobs from search_jobs output.
     - Removes jobs below min_match_score
     - Excludes jobs in avoid categories
+    - Excludes jobs posted more than max_days_old days ago
     - Returns top 20
     """
     filtered: list[dict[str, Any]] = []
@@ -752,6 +813,10 @@ def filter_jobs(
         if job.get("match_score", 0) < min_match_score:
             continue
         if should_exclude(job.get("title", ""), job.get("description", "")):
+            continue
+        # Skip jobs older than max_days_old (allow -1 = unknown through)
+        days = job.get("posted_days_ago", -1)
+        if days > max_days_old:
             continue
         filtered.append(job)
 
