@@ -17,7 +17,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 from datetime import datetime, timezone
 
-from config import load_config
+from config import get_user_agent, load_config
 from tools.profile import PROFILE, compute_match_score, should_exclude
 from tools.session import load_cookies
 
@@ -750,10 +750,7 @@ async def search_jobs(
         # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
         browser = await pw.firefox.launch(headless=False)
         context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) "
-                "Gecko/20100101 Firefox/128.0"
-            ),
+            user_agent=get_user_agent(),
             viewport={"width": 1280, "height": 800},
             locale="en-IN",
             timezone_id="Asia/Kolkata",

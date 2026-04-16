@@ -13,7 +13,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, async_playwright
 
-from config import SESSIONS_DIR, ensure_dirs
+from config import SESSIONS_DIR, ensure_dirs, get_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +89,7 @@ async def interactive_login(platform: str) -> dict[str, Any]:
         # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
         browser = await pw.firefox.launch(headless=False)
         context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) "
-                "Gecko/20100101 Firefox/128.0"
-            ),
+            user_agent=get_user_agent(),
             viewport={"width": 1280, "height": 800},
             locale="en-IN",
             timezone_id="Asia/Kolkata",

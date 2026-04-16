@@ -12,7 +12,7 @@ from typing import Any
 
 from playwright.async_api import Page, async_playwright
 
-from config import AppConfig, load_config
+from config import AppConfig, get_user_agent, load_config
 from tools.session import load_cookies, save_cookies_from_context
 from tools.tracker import is_already_applied, record_application
 
@@ -803,10 +803,7 @@ async def apply_job(
         # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
         browser = await pw.firefox.launch(headless=False)
         context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) "
-                "Gecko/20100101 Firefox/128.0"
-            ),
+            user_agent=get_user_agent(),
             viewport={"width": 1280, "height": 800},
             locale="en-IN",
             timezone_id="Asia/Kolkata",
@@ -932,10 +929,7 @@ async def bulk_apply(
         async with async_playwright() as pw:
             browser = await pw.firefox.launch(headless=False)
             context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) "
-                    "Gecko/20100101 Firefox/128.0"
-                ),
+                user_agent=get_user_agent(),
                 viewport={"width": 1280, "height": 800},
                 locale="en-IN",
                 timezone_id="Asia/Kolkata",
