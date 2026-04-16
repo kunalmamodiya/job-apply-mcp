@@ -258,9 +258,16 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
 
             # --- Filter: skip jobs older than 30 days ---
             created = job.get("createdDate", "")
-            days_ago = _parse_days_ago(created) if created else -1
-            if days_ago == -1:
-                days_ago = _date_to_days_ago(created)
+            days_ago = -1
+            if isinstance(created, (int, float)) and created > 0:
+                # Epoch timestamp (seconds or milliseconds)
+                ts = created if created < 1e11 else created / 1000
+                delta = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
+                days_ago = max(0, delta.days)
+            elif isinstance(created, str) and created:
+                days_ago = _parse_days_ago(created)
+                if days_ago == -1:
+                    days_ago = _date_to_days_ago(created)
             if days_ago > 30:
                 continue
 
