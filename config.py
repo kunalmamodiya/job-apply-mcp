@@ -25,7 +25,7 @@ SESSIONS_DIR = APP_DIR / "sessions"
 DB_PATH = APP_DIR / "applications.db"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "resume_path": "/Users/pulkit.jain8004/Downloads/files/PulkitJain_Resume.pdf",
+    "resume_path": "",  # Set this to your resume path, e.g. /Users/you/resume.pdf or C:\Users\you\resume.pdf
     "name": "Pulkit Jain",
     "email": "",
     "phone": "",

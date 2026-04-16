@@ -108,20 +108,12 @@ async def interactive_login(platform: str) -> dict[str, Any]:
         try:
             logger.info(
                 "Browser opened for %s login. Please log in manually. "
-                "The session will be saved automatically when you close the browser "
-                "or after 5 minutes of inactivity.",
+                "Waiting 3 minutes for you to complete login...",
                 platform,
             )
-            # Wait until the URL changes from the login page (indicating
-            # successful login) or until the browser disconnects.
-            await page.wait_for_url(
-                lambda u: u != url,  # type: ignore[arg-type]
-                timeout=300_000,  # 5 minutes
-            )
-            # Give the page a moment to settle after redirect
-            await page.wait_for_timeout(3000)
+            # Wait 2 minutes for user to complete OTP login
+            await page.wait_for_timeout(120_000)
         except Exception:
-            # Timeout or user closed browser — save whatever we have
             pass
 
         count = await save_cookies_from_context(context, platform)

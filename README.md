@@ -12,39 +12,104 @@ MCP (Model Context Protocol) server that automates job searching and applying ac
 
 ## Setup
 
-### 1. Install dependencies
+### Prerequisites
+
+- Python 3.10+
+- Git
+- [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) (Windows only — install this first)
+
+### 1. Clone the repo
 
 ```bash
+git clone https://github.com/pulkit017/job-apply-mcp.git
 cd job-apply-mcp
-pip install -r requirements.txt
-playwright install chromium
 ```
 
-### 2. Configure your profile
+### 2. Create a virtual environment
 
-Create (or edit) `~/.job-apply-mcp/config.json`:
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+```
 
+> If you get a script execution error when activating, run this first:
+> ```powershell
+> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+> ```
+
+### 3. Install dependencies
+
+Use the venv's pip directly (no activation needed):
+
+**Windows:**
+```powershell
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\playwright install
+```
+
+**macOS/Linux:**
+```bash
+.venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install
+```
+
+### 4. Configure your profile
+
+Edit `config.py` and update the `DEFAULT_CONFIG` with your details:
+
+```python
+DEFAULT_CONFIG = {
+    "resume_path": "C:\\path\\to\\YourResume.pdf",  # Windows
+    # "resume_path": "/path/to/YourResume.pdf",     # macOS/Linux
+    "name": "Your Name",
+    "email": "you@example.com",
+    "phone": "+91-XXXXXXXXXX",
+    "location": "Your City, India",
+    "experience_years": 3,
+    ...
+}
+```
+
+> The config is also auto-saved to `~/.job-apply-mcp/config.json` on first run.
+
+### 5. Connect to Kiro (MCP)
+
+Create `.kiro/settings/mcp.json` in the project root:
+
+**Windows:**
 ```json
 {
-  "resume_path": "/absolute/path/to/your/resume.pdf",
-  "name": "Pulkit Jain",
-  "email": "you@example.com",
-  "phone": "+91-XXXXXXXXXX",
-  "location": "Jaipur, India",
-  "experience_years": 3,
-  "credentials": {
-    "linkedin": { "email": "", "password": "" },
-    "naukri":   { "email": "", "password": "" },
-    "wellfound":{ "email": "", "password": "" },
-    "indeed":   { "email": "", "password": "" },
-    "hirist":   { "email": "", "password": "" }
+  "mcpServers": {
+    "job-apply-mcp": {
+      "command": "C:\\path\\to\\job-apply-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\job-apply-mcp\\server.py"],
+      "disabled": false,
+      "autoApprove": ["search_jobs", "filter_jobs", "get_application_status"]
+    }
   }
 }
 ```
 
-> The config file is auto-created with empty defaults the first time the server runs.
+**macOS/Linux:**
+```json
+{
+  "mcpServers": {
+    "job-apply-mcp": {
+      "command": "/path/to/job-apply-mcp/.venv/bin/python",
+      "args": ["/path/to/job-apply-mcp/server.py"],
+      "disabled": false,
+      "autoApprove": ["search_jobs", "filter_jobs", "get_application_status"]
+    }
+  }
+}
+```
 
-### 3. Save browser sessions
+> Replace `C:\\path\\to\\` with the actual absolute path on your machine.
+
+Then open Kiro, go to the MCP Server view in the panel, and click **Reconnect**.
+
+### 6. Save browser sessions
 
 Before applying, log in to each platform so the server can reuse your session cookies:
 
@@ -53,24 +118,6 @@ Use the save_session tool with platform = "linkedin"
 ```
 
 This opens a visible browser — log in manually, then the session is saved to `~/.job-apply-mcp/sessions/<platform>.json`.
-
-## Claude Desktop Integration
-
-Add the following to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
-
-```json
-{
-  "mcpServers": {
-    "job-apply-mcp": {
-      "command": "python",
-      "args": ["/full/path/to/job-apply-mcp/server.py"],
-      "env": {}
-    }
-  }
-}
-```
-
-> Replace `/full/path/to/` with the actual path on your machine.
 
 ## Tools
 

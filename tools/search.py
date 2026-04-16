@@ -52,6 +52,16 @@ def _date_to_days_ago(date_str: str) -> int:
     """Parse an ISO/epoch date string and return days ago. Returns -1 on failure."""
     if not date_str:
         return -1
+    # Handle Unix timestamp in milliseconds (Naukri uses this)
+    try:
+        ts = int(str(date_str).strip())
+        if ts > 1_000_000_000_000:  # milliseconds
+            ts = ts / 1000
+        dt = datetime.fromtimestamp(ts)
+        delta = datetime.now() - dt
+        return max(0, delta.days)
+    except Exception:
+        pass
     try:
         # Naukri uses "DD MMM YYYY" like "14 Apr 2026"
         dt = datetime.strptime(date_str.strip(), "%d %b %Y")
@@ -105,9 +115,10 @@ def _linkedin_url(keywords: str, location: str, experience: int) -> str:
 
 
 def _naukri_url(keywords: str, location: str, experience: int) -> str:
-    kw_slug = keywords.lower().replace(" ", "-").replace(",", "-")
+    # Use only the first keyword for the URL slug to avoid broken URLs
+    first_kw = keywords.split(",")[0].strip()
+    kw_slug = first_kw.lower().replace(" ", "-").replace("/", "-")
     loc_slug = location.lower().replace(" ", "-").replace(",", "")
-    # Use experience range: e.g. 3 years → search 3-5 year range
     exp_min = experience
     exp_max = experience + 2
     return (
@@ -240,12 +251,46 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
         await route.fulfill(response=response)
 
     try:
-        await page.context.route("**/jobapi/**", _intercept)
+        await page.context.route("**/*", _intercept)
         await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        await page.wait_for_timeout(5000)
+        # Wait longer for API call to fire
+        await page.wait_for_timeout(10000)
 
         if not api_data or "jobDetails" not in api_data:
-            logger.warning("Naukri: could not capture job API data")
+            logger.warning("Naukri: could not capture job API data, trying DOM scrape")
+            # Fallback: scrape job cards directly from DOM
+            try:
+                job_cards = await page.query_selector_all(".srp-jobtuple-wrapper")
+                logger.info("Naukri DOM: found %d job cards", len(job_cards))
+                for card in job_cards:
+                    try:
+                        title_el = await card.query_selector(".job-title a, a.title")
+                        company_el = await card.query_selector(".comp-name, a[class*='comp']")
+                        loc_el = await card.query_selector(".loc-wrap, span[class*='location'], .ni-job-tuple-icon-srp-location")
+                        link_el = await card.query_selector(".job-title a, a.title")
+
+                        title = await title_el.inner_text() if title_el else ""
+                        company = await company_el.inner_text() if company_el else ""
+                        location = await loc_el.inner_text() if loc_el else ""
+                        apply_url = await link_el.get_attribute("href") if link_el else url
+
+                        if title:
+                            score = compute_match_score(title, "", location, [])
+                            results.append(JobResult(
+                                title=title.strip(),
+                                company=company.strip(),
+                                location=location.strip(),
+                                salary="Not listed",
+                                apply_url=apply_url or url,
+                                match_score=score,
+                                platform="naukri",
+                                description="",
+                                posted_days_ago=0,
+                            ))
+                    except Exception as e:
+                        logger.warning("Naukri DOM card parse error: %s", e)
+            except Exception as e:
+                logger.error("Naukri DOM fallback error: %s", e)
             return results
 
         jobs = api_data["jobDetails"]
@@ -268,6 +313,8 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
                 days_ago = _parse_days_ago(created)
                 if days_ago == -1:
                     days_ago = _date_to_days_ago(created)
+            if days_ago == -1:
+                days_ago = 0  # treat unknown date as recent
             if days_ago > 30:
                 continue
 
