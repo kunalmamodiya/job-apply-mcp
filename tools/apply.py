@@ -25,187 +25,177 @@ logger = logging.getLogger(__name__)
 async def _autofill_fields(page: Page, cfg: AppConfig) -> int:
     """
     Scan all visible input/select/textarea fields on the page and fill them
-    using the autofill config.  Returns the number of fields filled.
+    using the autofill config via JavaScript for reliability.
+    Returns the number of fields filled.
     """
     af = cfg.autofill
     if not af:
         return 0
 
-    exp_map: dict[str, str] = af.get("experience", {})
-    pref_locs: list[str] = af.get("preferred_locations", [])
+    # Build the full answer map to pass into JS
+    answers: dict[str, str] = {
+        "name": cfg.name,
+        "email": cfg.email,
+        "phone": cfg.phone,
+        "gender": af.get("gender", ""),
+        "date_of_birth": af.get("date_of_birth", ""),
+        "dob": af.get("date_of_birth", ""),
+        "notice_period": af.get("notice_period", ""),
+        "notice period": af.get("notice_period", ""),
+        "current_ctc": af.get("current_ctc", ""),
+        "current ctc": af.get("current_ctc", ""),
+        "current salary": af.get("current_ctc", ""),
+        "expected_ctc": af.get("expected_ctc", ""),
+        "expected ctc": af.get("expected_ctc", ""),
+        "expected salary": af.get("expected_ctc", ""),
+        "total_experience": af.get("total_experience", ""),
+        "total experience": af.get("total_experience", ""),
+        "years of experience": af.get("total_experience", ""),
+        "overall experience": af.get("total_experience", ""),
+        "location": af.get("preferred_locations", [""])[0] if af.get("preferred_locations") else cfg.location,
+        "city": af.get("preferred_locations", [""])[0] if af.get("preferred_locations") else cfg.location,
+        "preferred location": af.get("preferred_locations", [""])[0] if af.get("preferred_locations") else cfg.location,
+        "current location": cfg.location,
+    }
+    # Add experience keywords
+    for k, v in af.get("experience", {}).items():
+        answers[k.lower()] = v
 
-    # Build keyword -> value lookup for experience fields
-    # Keys are lowered keywords; values are years strings
-    exp_lookup = {k.lower(): v for k, v in exp_map.items()}
+    pref_locs = af.get("preferred_locations", [])
 
-    filled = 0
+    # ---- Use JavaScript to find and fill all visible fields ----
+    filled = await page.evaluate('''(config) => {
+        const answers = config.answers;
+        const prefLocs = config.prefLocs;
+        let filled = 0;
 
-    # --- Text / number inputs ---
-    inputs = await page.query_selector_all(
-        "input[type='text']:visible, input[type='number']:visible, "
-        "input[type='tel']:visible, input:not([type]):visible, "
-        "textarea:visible"
-    )
-    for inp in inputs:
-        # Skip if already has a value
-        try:
-            current = (await inp.input_value()).strip()
-            if current:
-                continue
-        except Exception:
-            continue
+        function getContext(el) {
+            const ph = (el.placeholder || "").toLowerCase();
+            const nm = (el.name || "").toLowerCase();
+            const ar = (el.getAttribute("aria-label") || "").toLowerCase();
+            const id = el.id || "";
+            let lbl = "";
+            if (id) {
+                const labelEl = document.querySelector('label[for="' + id + '"]');
+                if (labelEl) lbl = labelEl.textContent.toLowerCase();
+            }
+            // Also check parent/sibling text
+            const parent = el.closest("div, li, td, span, label");
+            const parentText = parent ? parent.textContent.toLowerCase().substring(0, 200) : "";
+            return (ph + " " + nm + " " + ar + " " + lbl + " " + parentText).toLowerCase();
+        }
 
-        # Gather context: placeholder, label, name, aria-label
-        placeholder = ((await inp.get_attribute("placeholder")) or "").lower()
-        name_attr = ((await inp.get_attribute("name")) or "").lower()
-        aria = ((await inp.get_attribute("aria-label")) or "").lower()
-        # Try to find associated label
-        inp_id = await inp.get_attribute("id")
-        label_text = ""
-        if inp_id:
-            label_el = await page.query_selector(f"label[for='{inp_id}']")
-            if label_el:
-                label_text = (await label_el.inner_text()).lower()
-        context = f"{placeholder} {name_attr} {aria} {label_text}"
+        function isVisible(el) {
+            return el.offsetParent !== null || el.offsetWidth > 0 || el.offsetHeight > 0;
+        }
 
-        value = None
+        function triggerChange(el) {
+            el.dispatchEvent(new Event("input", {bubbles: true}));
+            el.dispatchEvent(new Event("change", {bubbles: true}));
+        }
 
-        # Name
-        if any(w in context for w in ("name", "full name", "candidate name")):
-            if "company" not in context and "job" not in context:
-                value = cfg.name
-        # Email
-        elif any(w in context for w in ("email", "e-mail")):
-            value = cfg.email
-        # Phone
-        elif any(w in context for w in ("phone", "mobile", "contact number")):
-            value = cfg.phone
-        # Date of birth
-        elif any(w in context for w in ("dob", "date of birth", "birth date", "birthdate")):
-            value = af.get("date_of_birth", "")
-        # Gender
-        elif "gender" in context:
-            value = af.get("gender", "")
-        # Notice period
-        elif any(w in context for w in ("notice period", "notice_period", "noticePeriod")):
-            value = af.get("notice_period", "")
-        # CTC
-        elif any(w in context for w in ("current ctc", "current_ctc", "currentctc", "current salary")):
-            value = af.get("current_ctc", "")
-        elif any(w in context for w in ("expected ctc", "expected_ctc", "expectedctc", "expected salary")):
-            value = af.get("expected_ctc", "")
-        # Total experience
-        elif any(w in context for w in ("total experience", "total_experience", "totalexp", "overall experience", "years of experience")):
-            value = af.get("total_experience", "")
-        # Location / city
-        elif any(w in context for w in ("location", "city", "preferred location", "current location")):
-            value = pref_locs[0] if pref_locs else cfg.location
-        else:
-            # Try matching against experience keywords
-            for kw, yrs in exp_lookup.items():
-                kw_parts = kw.split()
-                if all(p in context for p in kw_parts):
-                    value = yrs
-                    break
+        // --- Text/number/tel inputs and textareas ---
+        const inputs = document.querySelectorAll(
+            'input[type="text"], input[type="number"], input[type="tel"], ' +
+            'input:not([type]), textarea'
+        );
+        for (const inp of inputs) {
+            if (!isVisible(inp)) continue;
+            if (inp.value && inp.value.trim()) continue;
+            // Skip search bars
+            if (inp.placeholder && /search|keyword/i.test(inp.placeholder)) continue;
 
-        if value:
-            try:
-                await inp.fill(str(value))
-                filled += 1
-            except Exception:
-                pass
+            const ctx = getContext(inp);
+            let matched = false;
 
-    # --- Select / dropdown fields ---
-    selects = await page.query_selector_all("select:visible")
-    for sel in selects:
-        name_attr = ((await sel.get_attribute("name")) or "").lower()
-        aria = ((await sel.get_attribute("aria-label")) or "").lower()
-        sel_id = await sel.get_attribute("id")
-        label_text = ""
-        if sel_id:
-            label_el = await page.query_selector(f"label[for='{sel_id}']")
-            if label_el:
-                label_text = (await label_el.inner_text()).lower()
-        context = f"{name_attr} {aria} {label_text}"
+            // Try each answer key against the context
+            for (const [key, val] of Object.entries(answers)) {
+                if (!val) continue;
+                const parts = key.split(/\s+/);
+                if (parts.every(p => ctx.includes(p))) {
+                    // Extra guard: don't fill "company name" with person name
+                    if (key === "name" && (ctx.includes("company") || ctx.includes("job"))) continue;
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    )?.set || Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    )?.set;
+                    if (nativeSetter) {
+                        nativeSetter.call(inp, val);
+                    } else {
+                        inp.value = val;
+                    }
+                    triggerChange(inp);
+                    filled++;
+                    matched = true;
+                    break;
+                }
+            }
+        }
 
-        # Get all option texts
-        options = await sel.query_selector_all("option")
-        option_texts = []
-        for opt in options:
-            option_texts.append(((await opt.inner_text()).strip(), await opt.get_attribute("value") or ""))
+        // --- Select dropdowns ---
+        const selects = document.querySelectorAll("select");
+        for (const sel of selects) {
+            if (!isVisible(sel)) continue;
+            const ctx = getContext(sel);
+            const options = Array.from(sel.options).map(o => ({
+                text: o.textContent.toLowerCase().trim(),
+                value: o.value
+            }));
 
-        chosen = None
+            let chosen = null;
 
-        if "gender" in context:
-            target = af.get("gender", "male").lower()
-            for text, val in option_texts:
-                if target in text.lower():
-                    chosen = val or text
-                    break
-        elif any(w in context for w in ("location", "city", "preferred")):
-            for pref in pref_locs:
-                for text, val in option_texts:
-                    if pref.lower() in text.lower():
-                        chosen = val or text
-                        break
-                if chosen:
-                    break
-        elif any(w in context for w in ("notice", "notice_period")):
-            target = af.get("notice_period", "immediate").lower()
-            for text, val in option_texts:
-                if target in text.lower():
-                    chosen = val or text
-                    break
-        elif any(w in context for w in ("experience", "exp")):
-            # Match the closest experience value
-            for text, val in option_texts:
-                if "3" in text or "4" in text:
-                    chosen = val or text
-                    break
+            if (ctx.includes("gender")) {
+                const target = (answers.gender || "male").toLowerCase();
+                chosen = options.find(o => o.text.includes(target));
+            } else if (ctx.includes("location") || ctx.includes("city") || ctx.includes("preferred")) {
+                for (const pref of prefLocs) {
+                    chosen = options.find(o => o.text.includes(pref.toLowerCase()));
+                    if (chosen) break;
+                }
+            } else if (ctx.includes("notice")) {
+                const target = (answers.notice_period || "immediate").toLowerCase();
+                chosen = options.find(o => o.text.includes(target));
+            } else if (ctx.includes("experience") || ctx.includes("exp")) {
+                chosen = options.find(o => /[34]/.test(o.text));
+            }
 
-        if chosen:
-            try:
-                await sel.select_option(chosen)
-                filled += 1
-            except Exception:
-                pass
+            if (chosen) {
+                sel.value = chosen.value;
+                triggerChange(sel);
+                filled++;
+            }
+        }
 
-    # --- Radio buttons ---
-    # Handle gender, location preference, etc.
-    radios = await page.query_selector_all("input[type='radio']:visible")
-    radio_groups: dict[str, list] = {}
-    for radio in radios:
-        rname = await radio.get_attribute("name") or ""
-        if rname not in radio_groups:
-            radio_groups[rname] = []
-        label_el = await radio.evaluate_handle(
-            "el => el.closest('label') || el.parentElement"
-        )
-        label_text = ""
-        try:
-            label_text = (await label_el.as_element().inner_text()).lower()
-        except Exception:
-            pass
-        rvalue = (await radio.get_attribute("value") or "").lower()
-        radio_groups[rname].append((radio, rvalue, label_text))
+        // --- Radio buttons ---
+        const radios = document.querySelectorAll('input[type="radio"]');
+        const radioGroups = {};
+        for (const r of radios) {
+            if (!isVisible(r)) continue;
+            const name = r.name || "";
+            if (!radioGroups[name]) radioGroups[name] = [];
+            const label = (r.closest("label") || r.parentElement);
+            const labelText = label ? label.textContent.toLowerCase().trim() : "";
+            radioGroups[name].push({el: r, value: (r.value || "").toLowerCase(), label: labelText});
+        }
+        for (const [name, group] of Object.entries(radioGroups)) {
+            const ctx = name.toLowerCase();
+            let target = null;
+            if (ctx.includes("gender")) target = (answers.gender || "male").toLowerCase();
+            else if (ctx.includes("location") || ctx.includes("remote")) target = prefLocs[0]?.toLowerCase();
 
-    for rname, group in radio_groups.items():
-        context = rname.lower()
-        target = None
-        if "gender" in context:
-            target = af.get("gender", "male").lower()
-        elif any(w in context for w in ("location", "city", "remote")):
-            target = pref_locs[0].lower() if pref_locs else None
+            if (target) {
+                const match = group.find(r => r.value.includes(target) || r.label.includes(target));
+                if (match) {
+                    match.el.checked = true;
+                    match.el.dispatchEvent(new Event("change", {bubbles: true}));
+                    filled++;
+                }
+            }
+        }
 
-        if target:
-            for radio, rvalue, label_text in group:
-                if target in rvalue or target in label_text:
-                    try:
-                        await radio.check()
-                        filled += 1
-                    except Exception:
-                        pass
-                    break
+        return filled;
+    }''', {"answers": answers, "prefLocs": pref_locs})
 
     if filled:
         logger.info("Autofill: filled %d fields", filled)
@@ -219,66 +209,58 @@ async def _autofill_fields(page: Page, cfg: AppConfig) -> int:
 async def _upload_resume(page: Page, resume_path: str) -> bool:
     """
     Find any file-upload input on the page and upload the resume.
-    Handles visible inputs, hidden inputs, and inputs inside shadow DOM.
+    Uses multiple strategies: direct set, unhide + set, file chooser.
     Returns True if a file was uploaded.
     """
-    # Strategy 1: visible file input
-    file_inputs = await page.query_selector_all("input[type='file']")
-    for fi in file_inputs:
-        try:
-            await fi.set_input_files(resume_path)
-            logger.info("Resume uploaded via visible file input")
-            await page.wait_for_timeout(1000)
-            return True
-        except Exception:
-            pass
-
-    # Strategy 2: click an "Upload Resume" / "Attach Resume" button/link,
-    # which may reveal a hidden file input via JS
-    upload_btn = await page.query_selector(
-        "button:has-text('Upload'), button:has-text('Attach'), "
-        "a:has-text('Upload Resume'), a:has-text('Attach Resume'), "
-        "label:has-text('Upload'), label:has-text('Attach'), "
-        "div[class*='upload']:has-text('Upload'), "
-        "span:has-text('Upload Resume')"
-    )
-    if upload_btn:
-        # Set up a file chooser listener before clicking
-        try:
-            async with page.expect_file_chooser(timeout=5000) as fc_info:
-                await upload_btn.click()
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(resume_path)
-            logger.info("Resume uploaded via file chooser dialog")
-            await page.wait_for_timeout(1000)
-            return True
-        except Exception:
-            pass
-
-    # Strategy 3: hidden file input revealed after page interaction
-    hidden_inputs = await page.evaluate('''() => {
+    # Strategy 1: Unhide ALL file inputs via JS, then set files
+    count = await page.evaluate('''() => {
         const inputs = document.querySelectorAll('input[type="file"]');
+        for (const inp of inputs) {
+            inp.style.display = "block";
+            inp.style.visibility = "visible";
+            inp.style.opacity = "1";
+            inp.style.width = "1px";
+            inp.style.height = "1px";
+            inp.style.position = "absolute";
+        }
         return inputs.length;
     }''')
-    if hidden_inputs > 0:
-        try:
-            # Force the input to be interactable
-            await page.evaluate('''() => {
-                const inp = document.querySelector('input[type="file"]');
-                if (inp) {
-                    inp.style.display = "block";
-                    inp.style.visibility = "visible";
-                    inp.style.opacity = "1";
-                }
-            }''')
-            fi = await page.query_selector("input[type='file']")
-            if fi:
+
+    if count > 0:
+        file_inputs = await page.query_selector_all("input[type='file']")
+        for fi in file_inputs:
+            try:
                 await fi.set_input_files(resume_path)
-                logger.info("Resume uploaded via unhidden file input")
-                await page.wait_for_timeout(1000)
+                logger.info("Resume uploaded via file input (unhidden)")
+                await page.wait_for_timeout(1500)
                 return True
-        except Exception:
-            pass
+            except Exception as e:
+                logger.debug("File input set_input_files failed: %s", e)
+
+    # Strategy 2: Find upload button/label and use file chooser
+    upload_selectors = [
+        "button:has-text('Upload')", "button:has-text('Attach')",
+        "a:has-text('Upload Resume')", "a:has-text('Attach Resume')",
+        "label:has-text('Upload')", "label:has-text('Attach')",
+        "span:has-text('Upload Resume')", "span:has-text('upload resume')",
+        "div:has-text('Upload Resume')",
+    ]
+    for sel in upload_selectors:
+        btn = await page.query_selector(sel)
+        if btn:
+            try:
+                visible = await btn.is_visible()
+                if not visible:
+                    continue
+                async with page.expect_file_chooser(timeout=3000) as fc_info:
+                    await btn.click()
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(resume_path)
+                logger.info("Resume uploaded via file chooser (%s)", sel)
+                await page.wait_for_timeout(1500)
+                return True
+            except Exception:
+                pass
 
     return False
 
