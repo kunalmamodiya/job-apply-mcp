@@ -12,9 +12,13 @@ from typing import Any
 
 from playwright.async_api import Page, async_playwright
 
-from config import AppConfig, get_user_agent, load_config
+from pathlib import Path
+
+from config import APP_DIR, AppConfig, get_user_agent, load_config
 from tools.session import load_cookies, save_cookies_from_context
 from tools.tracker import is_already_applied, record_application
+
+BROWSER_PROFILES_DIR = APP_DIR / "browser-profiles"
 
 logger = logging.getLogger(__name__)
 
@@ -209,41 +213,54 @@ async def _autofill_fields(page: Page, cfg: AppConfig) -> int:
 async def _upload_resume(page: Page, resume_path: str) -> bool:
     """
     Find any file-upload input on the page and upload the resume.
-    Uses multiple strategies: direct set, unhide + set, file chooser.
+    Uses multiple strategies for maximum compatibility.
     Returns True if a file was uploaded.
     """
-    # Strategy 1: Unhide ALL file inputs via JS, then set files
+    # Strategy 1: Make ALL file inputs fully visible and interactable
     count = await page.evaluate('''() => {
         const inputs = document.querySelectorAll('input[type="file"]');
         for (const inp of inputs) {
-            inp.style.display = "block";
-            inp.style.visibility = "visible";
-            inp.style.opacity = "1";
-            inp.style.width = "1px";
-            inp.style.height = "1px";
-            inp.style.position = "absolute";
+            inp.style.cssText = "display:block !important; visibility:visible !important; opacity:1 !important; width:100px !important; height:30px !important; position:relative !important; z-index:99999 !important;";
+            // Also make parents visible
+            let parent = inp.parentElement;
+            for (let i = 0; i < 5 && parent; i++) {
+                parent.style.overflow = "visible";
+                parent.style.display = "block";
+                parent = parent.parentElement;
+            }
         }
         return inputs.length;
     }''')
 
     if count > 0:
+        # Try page.set_input_files with selector (more reliable than element handle)
+        try:
+            await page.set_input_files("input[type='file']", resume_path)
+            logger.info("Resume uploaded via page.set_input_files")
+            await page.wait_for_timeout(2000)
+            return True
+        except Exception as e:
+            logger.debug("page.set_input_files failed: %s", e)
+
+        # Fallback: try each file input element
         file_inputs = await page.query_selector_all("input[type='file']")
         for fi in file_inputs:
             try:
                 await fi.set_input_files(resume_path)
-                logger.info("Resume uploaded via file input (unhidden)")
-                await page.wait_for_timeout(1500)
+                logger.info("Resume uploaded via element.set_input_files")
+                await page.wait_for_timeout(2000)
                 return True
             except Exception as e:
-                logger.debug("File input set_input_files failed: %s", e)
+                logger.debug("element.set_input_files failed: %s", e)
 
-    # Strategy 2: Find upload button/label and use file chooser
+    # Strategy 2: Click upload button/label and intercept file chooser
     upload_selectors = [
         "button:has-text('Upload')", "button:has-text('Attach')",
         "a:has-text('Upload Resume')", "a:has-text('Attach Resume')",
         "label:has-text('Upload')", "label:has-text('Attach')",
         "span:has-text('Upload Resume')", "span:has-text('upload resume')",
         "div:has-text('Upload Resume')",
+        "label[for*='file']", "label[for*='resume']", "label[for*='upload']",
     ]
     for sel in upload_selectors:
         btn = await page.query_selector(sel)
@@ -252,15 +269,39 @@ async def _upload_resume(page: Page, resume_path: str) -> bool:
                 visible = await btn.is_visible()
                 if not visible:
                     continue
-                async with page.expect_file_chooser(timeout=3000) as fc_info:
+                async with page.expect_file_chooser(timeout=5000) as fc_info:
                     await btn.click()
                 file_chooser = await fc_info.value
                 await file_chooser.set_files(resume_path)
                 logger.info("Resume uploaded via file chooser (%s)", sel)
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(2000)
                 return True
             except Exception:
                 pass
+
+    # Strategy 3: Click ANY element that mentions upload/resume and intercept
+    try:
+        upload_el = await page.evaluate('''() => {
+            const els = document.querySelectorAll('*');
+            for (const el of els) {
+                if (el.offsetParent === null) continue;
+                const t = el.textContent.trim().toLowerCase();
+                if (t.length < 50 && (t.includes('upload resume') || t.includes('attach resume') || t === 'upload' || t === 'attach')) {
+                    return true;
+                }
+            }
+            return false;
+        }''')
+        if upload_el:
+            async with page.expect_file_chooser(timeout=5000) as fc_info:
+                await page.click("text=/upload|attach/i")
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(resume_path)
+            logger.info("Resume uploaded via text-match click")
+            await page.wait_for_timeout(2000)
+            return True
+    except Exception:
+        pass
 
     return False
 
@@ -284,55 +325,93 @@ async def _detect_captcha(page: Page) -> bool:
 # ---------------------------------------------------------------------------
 
 async def _apply_linkedin(page: Page, cfg: AppConfig, cover_note: str) -> dict[str, Any]:
-    """Attempt to apply via LinkedIn Easy Apply."""
+    """Apply via LinkedIn Easy Apply with autofill and multi-step handling."""
     try:
-        easy_apply_btn = await page.query_selector(
-            "button.jobs-apply-button, button[data-control-name='jobdetails_topcard_inapply']"
-        )
+        # Find Easy Apply button — use aria-label which is most reliable
+        easy_apply_btn = await page.evaluate('''() => {
+            const btns = document.querySelectorAll('button');
+            for (const btn of btns) {
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                const text = btn.textContent.trim().toLowerCase();
+                const isApply = aria.startsWith('easy apply to') ||
+                    (text === 'easy apply' && btn.className.includes('jobs-apply'));
+                if (isApply && btn.offsetParent !== null) {
+                    return true;
+                }
+            }
+            return false;
+        }''')
+
         if not easy_apply_btn:
-            return {"success": False, "error": "No Easy Apply button found — external application required"}
+            return {"success": False, "error": "No Easy Apply button — external apply, skipped"}
+
+        # Click it via JS
+        await page.evaluate('''() => {
+            const btns = document.querySelectorAll('button');
+            for (const btn of btns) {
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.startsWith('easy apply to') && btn.offsetParent !== null) {
+                    btn.click();
+                    return;
+                }
+            }
+        }''')
+
+        if not easy_apply_btn:
+            return {"success": False, "error": "No Easy Apply button — external apply, skipped"}
 
         await easy_apply_btn.click()
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2500)
 
-        # Fill phone if present and empty
-        phone_input = await page.query_selector("input[name*='phone'], input[id*='phone']")
-        if phone_input:
-            current = await phone_input.input_value()
-            if not current.strip():
-                await phone_input.fill(cfg.phone)
+        # Multi-step loop: autofill, upload resume, click Next/Submit
+        filled_total = 0
+        for step in range(8):
+            # Autofill all visible fields
+            filled_total += await _autofill_fields(page, cfg)
 
-        # Upload resume if upload button exists
-        file_input = await page.query_selector("input[type='file']")
-        if file_input and cfg.resume_exists:
-            await file_input.set_input_files(cfg.resume_path)
-            await page.wait_for_timeout(1000)
+            # Upload resume if prompted
+            if cfg.resume_exists:
+                await _upload_resume(page, cfg.resume_path)
 
-        # Add cover note in additional questions textarea
-        if cover_note:
-            textarea = await page.query_selector("textarea[name*='cover'], textarea[name*='additional']")
-            if textarea:
-                await textarea.fill(cover_note)
+            # Check for success / dismiss
+            text = (await page.inner_text("body")).lower()
+            if "application submitted" in text or "your application was sent" in text:
+                dismiss = await page.query_selector(
+                    "button[aria-label='Dismiss'], button:has-text('Done')"
+                )
+                if dismiss:
+                    try:
+                        await dismiss.click()
+                    except Exception:
+                        pass
+                return {"success": True, "confirmation": "LinkedIn Easy Apply submitted"}
 
-        # Try to click through multi-step form
-        for _ in range(5):
+            # Find Submit or Next button
             submit_btn = await page.query_selector(
-                "button[aria-label='Submit application'], button[aria-label='Review']"
+                "button[aria-label='Submit application'], "
+                "button[aria-label='Review your application'], "
+                "button:has-text('Submit application')"
             )
             next_btn = await page.query_selector(
-                "button[aria-label='Continue to next step'], button[aria-label='Next']"
+                "button[aria-label='Continue to next step'], "
+                "button[aria-label='Next'], "
+                "button:has-text('Next'), "
+                "button:has-text('Review')"
             )
+
             if submit_btn:
                 await submit_btn.click()
-                await page.wait_for_timeout(2000)
-                return {"success": True, "confirmation": "LinkedIn Easy Apply submitted"}
+                await page.wait_for_timeout(2500)
+                text2 = (await page.inner_text("body")).lower()
+                if "application submitted" in text2 or "your application was sent" in text2:
+                    return {"success": True, "confirmation": "LinkedIn Easy Apply submitted"}
             elif next_btn:
                 await next_btn.click()
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(1500)
             else:
                 break
 
-        return {"success": False, "error": "Could not complete LinkedIn application flow"}
+        return {"success": True, "confirmation": f"LinkedIn apply completed (autofilled {filled_total} fields)"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -410,65 +489,200 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
 
         await page.wait_for_timeout(3000)
 
-        # --- Multi-step apply loop ---
-        # Naukri may show chatbot questions, resume upload, or a multi-step
-        # form.  We loop up to 10 rounds: each round we autofill fields,
-        # upload resume if asked, and click the next/submit button.
-        filled_total = 0
-        for step in range(10):
-            # 1) Auto-fill any visible form fields
-            filled_total += await _autofill_fields(page, cfg)
+        # --- Naukri chatbot / multi-step apply loop ---
+        # Naukri chatbot uses:
+        #   - contenteditable div (class="textArea") for text answers (NOT <input>)
+        #   - radio buttons (class="ssrc__radio") for choice answers
+        #   - div.sendMsg "Save" (NOT <button>) to submit each answer
+        #   - input.chatbot_Uploader[type=file] for resume upload
+        af = cfg.autofill or {}
+        exp_map = {k.lower(): v for k, v in af.get("experience", {}).items()}
+        answered = 0
 
-            # 2) Upload resume — check ALL file inputs (visible + hidden)
-            if cfg.resume_exists:
-                await _upload_resume(page, cfg.resume_path)
+        for step in range(15):
+            await page.wait_for_timeout(2000)
 
-            # 3) Check if we're done
+            # Check if we're done
             text = (await page.inner_text("body")).lower()
             if "already applied" in text:
                 return {"success": True, "confirmation": "Already applied to this job on Naukri"}
             if "application submitted" in text or "applied successfully" in text:
-                return {"success": True, "confirmation": "Naukri application submitted successfully"}
+                return {"success": True, "confirmation": f"Naukri application submitted (answered {answered} questions)"}
 
-            # 4) Find and click submit/next/continue button
-            clicked = await page.evaluate('''() => {
-                // Priority order: Submit > Next > Continue > any chatbot button
-                const selectors = [
-                    'button[class*="chatbot_SubmitBtn"]',
-                    'button[class*="submit"]:not([disabled])',
-                    'button[type="submit"]:not([disabled])',
-                    'button:has-text("Submit"):not([disabled])',
-                    'button:has-text("Next"):not([disabled])',
-                    'button:has-text("Continue"):not([disabled])',
-                    'button:has-text("Apply"):not([disabled])',
-                ];
-                for (const sel of selectors) {
-                    try {
-                        const btn = document.querySelector(sel);
-                        if (btn && btn.offsetParent !== null) {
-                            btn.scrollIntoView();
-                            btn.click();
-                            return sel;
+            # --- Read the LAST chatbot question only ---
+            question = await page.evaluate("""() => {
+                // Get only the last bot message (the current question)
+                const botItems = document.querySelectorAll('li.botItem');
+                if (botItems.length === 0) return '';
+                const lastBot = botItems[botItems.length - 1];
+                const span = lastBot.querySelector('span');
+                return span ? span.textContent.trim().toLowerCase() : lastBot.textContent.trim().toLowerCase();
+            }""")
+            logger.info("Naukri chatbot step %d Q: %s", step + 1, question[:60])
+
+            # === 1) RADIO BUTTONS (ssrc__radio) ===
+            has_radios = await page.evaluate("""() => {
+                return document.querySelectorAll('input[type="radio"]').length > 0 &&
+                    Array.from(document.querySelectorAll('input[type="radio"]')).some(r => r.offsetParent !== null);
+            }""")
+
+            if has_radios:
+                chosen = await page.evaluate("""(config) => {
+                    const q = config.question;
+                    const af = config.af;
+                    const expMap = config.expMap;
+                    const radios = document.querySelectorAll('input[type="radio"]');
+                    const options = [];
+                    radios.forEach(r => {
+                        if (!r.offsetParent) return;
+                        const lbl = document.querySelector('label[for="' + r.id + '"]');
+                        options.push({el: r, value: r.value, label: lbl ? lbl.textContent.trim().toLowerCase() : r.value});
+                    });
+                    if (!options.length) return false;
+
+                    let chosen = null;
+
+                    if (/immediate|joiner|notice|join/.test(q)) {
+                        chosen = options.find(o => o.value === '0') || options[0];
+                    } else if (/gender/.test(q)) {
+                        const target = (af.gender || 'male').toLowerCase();
+                        chosen = options.find(o => o.label.includes(target)) || options[0];
+                    } else if (/location|relocat|city/.test(q)) {
+                        for (const pref of (af.preferred_locations || [])) {
+                            chosen = options.find(o => o.label.includes(pref.toLowerCase()));
+                            if (chosen) break;
                         }
-                    } catch(e) {}
+                    } else if (/willing|ready|agree|do you|are you|can you|comfortable|face to face|f2f|interview|onsite|in.person|office/.test(q)) {
+                        chosen = options.find(o => /yes|true|0|agree/.test(o.label)) || options[0];
+                    } else if (/experience|years/.test(q)) {
+                        const target = parseFloat(af.total_experience || '4');
+                        let best = null, bestDiff = 999;
+                        options.forEach(o => {
+                            const n = parseFloat(o.value);
+                            if (!isNaN(n) && Math.abs(n - target) < bestDiff) { bestDiff = Math.abs(n - target); best = o; }
+                        });
+                        chosen = best;
+                    }
+                    if (!chosen) {
+                        chosen = options.find(o => o.label.includes('skip')) || options[0];
+                    }
+                    if (chosen) { chosen.el.click(); return true; }
+                    return false;
+                }""", {"question": question, "af": af, "expMap": exp_map})
+                if chosen:
+                    answered += 1
+
+            # === 2) CONTENTEDITABLE DIV (Naukri chatbot text input) ===
+            has_contenteditable = await page.evaluate("""() => {
+                const ce = document.querySelector('div[contenteditable="true"].textArea, div[contenteditable="true"][data-placeholder]');
+                return !!(ce && ce.offsetParent !== null);
+            }""")
+
+            if has_contenteditable:
+                value = ""
+                # Yes/No text questions (comfortable, willing, ready, interview, etc.)
+                import re as _re
+                if _re.search(r"comfortable|willing|ready|agree|face to face|f2f|interview|onsite|in.person|office|relocat|do you|are you|can you|have you", question):
+                    value = "Yes"
+                elif "current" in question and "ctc" in question:
+                    value = af.get("current_ctc", "9")
+                elif "expected" in question and "ctc" in question:
+                    value = af.get("expected_ctc", "16")
+                elif "ctc" in question or "salary" in question or "lpa" in question or "compensation" in question:
+                    value = af.get("current_ctc", "9") if "current" in question or "present" in question else af.get("expected_ctc", "16")
+                elif "experience" in question or "years" in question:
+                    value = af.get("total_experience", "3.9")
+                    for kw, yrs in exp_map.items():
+                        if kw in question:
+                            value = yrs
+                            break
+                elif "notice" in question:
+                    value = "0"
+                elif "name" in question:
+                    value = cfg.name
+                elif "email" in question:
+                    value = cfg.email
+                elif "phone" in question or "mobile" in question:
+                    value = cfg.phone
+                elif "location" in question or "city" in question:
+                    pref = af.get("preferred_locations", [])
+                    value = pref[0] if pref else cfg.location
+                elif "age" in question:
+                    value = "25"
+
+                if value:
+                    # Click the contenteditable, clear it, type via keyboard
+                    ce_el = await page.query_selector('div[contenteditable="true"].textArea, div[contenteditable="true"][data-placeholder]')
+                    if ce_el:
+                        await ce_el.click()
+                        await page.wait_for_timeout(300)
+                        # Select all + delete to clear any old text
+                        await page.keyboard.press("Control+a")
+                        await page.keyboard.press("Meta+a")
+                        await page.keyboard.press("Delete")
+                        await page.wait_for_timeout(200)
+                        # Type the value character by character
+                        await page.keyboard.type(str(value), delay=50)
+                        await page.wait_for_timeout(500)
+                        answered += 1
+                        logger.info("Chatbot: typed '%s' for Q: %s", value, question[:40])
+
+            # === 3) STANDARD TEXT INPUTS (fallback for non-chatbot forms) ===
+            elif not has_radios:
+                await _autofill_fields(page, cfg)
+
+            # === 4) RESUME UPLOAD — only when question asks for it ===
+            if cfg.resume_exists and any(w in question for w in ("resume", "cv", "upload", "attach")):
+                uploaded = await _upload_resume(page, cfg.resume_path)
+                if uploaded:
+                    answered += 1
+
+            await page.wait_for_timeout(1000)
+
+            # === 5) CLICK SAVE ===
+            # Naukri chatbot Save is: <div class="send"><div class="sendMsg">Save</div></div>
+            # The parent div has "disabled" class until input has text.
+            # First remove disabled class, then click.
+            save_clicked = await page.evaluate("""() => {
+                // Remove disabled from send container
+                const sendContainer = document.querySelector('div.send, div[class*="sendMsgbtn_container"] div.send');
+                if (sendContainer) {
+                    sendContainer.classList.remove('disabled');
                 }
-                return "";
-            }''')
-
-            if not clicked:
-                break  # No more buttons to click — we're done
-
-            logger.info("Naukri step %d: clicked %s", step + 1, clicked)
-            await page.wait_for_timeout(2500)
+                // Click the sendMsg div
+                const sendMsg = document.querySelector('div.sendMsg');
+                if (sendMsg) {
+                    sendMsg.click();
+                    return 'sendMsg';
+                }
+                // Also try clicking the container itself
+                if (sendContainer) {
+                    sendContainer.click();
+                    return 'sendContainer';
+                }
+                // Fallback: any element with text "Save"
+                const all = document.querySelectorAll('div, button, a, span');
+                for (const el of all) {
+                    if (el.offsetParent === null) continue;
+                    const t = el.textContent.trim();
+                    if (t === 'Save' || t === 'Submit' || t === 'Next') {
+                        el.click();
+                        return t;
+                    }
+                }
+                return '';
+            }""")
+            if save_clicked:
+                logger.info("Naukri: clicked %s", save_clicked)
 
         # Final check
         text = (await page.inner_text("body")).lower()
         if "already applied" in text:
             return {"success": True, "confirmation": "Already applied to this job on Naukri"}
         if "application submitted" in text or "applied successfully" in text:
-            return {"success": True, "confirmation": "Naukri application submitted successfully"}
+            return {"success": True, "confirmation": f"Naukri applied (answered {answered} questions)"}
 
-        return {"success": True, "confirmation": f"Naukri apply completed (autofilled {filled_total} fields)"}
+        return {"success": True, "confirmation": f"Naukri apply completed (answered {answered} questions)"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -782,23 +996,46 @@ async def apply_job(
         }
 
     async with async_playwright() as pw:
-        # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
-        browser = await pw.firefox.launch(headless=False)
-        context = await browser.new_context(
-            user_agent=get_user_agent(),
-            viewport={"width": 1280, "height": 800},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            ignore_https_errors=True,
-        )
-        await load_cookies(context, platform)
+        # LinkedIn needs persistent browser profile for auth
+        if platform == "linkedin":
+            profile_dir = str(BROWSER_PROFILES_DIR / "linkedin")
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            context = await pw.firefox.launch_persistent_context(
+                profile_dir, headless=False,
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
+            is_persistent = True
 
-        page = await context.new_page()
-        await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_timeout(3000)
+            # LinkedIn Easy Apply only works from the search page with job selected.
+            # Extract job ID and navigate to search page with currentJobId.
+            import re as _re
+            job_id_match = _re.search(r'/jobs/view/(\d+)', job_url) or _re.search(r'currentJobId=(\d+)', job_url)
+            if job_id_match:
+                job_id = job_id_match.group(1)
+                nav_url = f"https://www.linkedin.com/jobs/search/?currentJobId={job_id}&f_AL=true"
+            else:
+                nav_url = job_url
+            await page.goto(nav_url, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(4000)
+        else:
+            browser = await pw.firefox.launch(headless=False)
+            context = await browser.new_context(
+                user_agent=get_user_agent(),
+                viewport={"width": 1280, "height": 800},
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+                ignore_https_errors=True,
+            )
+            await load_cookies(context, platform)
+            page = await context.new_page()
+            is_persistent = False
+
+            await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(3000)
 
         if await _detect_captcha(page):
-            await browser.close()
+            await context.close() if is_persistent else await browser.close()
             return {
                 "success": False,
                 "error": (
@@ -811,13 +1048,17 @@ async def apply_job(
         applyer = PLATFORM_APPLYERS[platform]
         result = await applyer(page, cfg, cover_note)
 
-        # Save cookies after apply (captures post-login session)
-        try:
-            await save_cookies_from_context(context, platform)
-        except Exception:
-            pass
+        # Save cookies after apply (non-LinkedIn only)
+        if not is_persistent:
+            try:
+                await save_cookies_from_context(context, platform)
+            except Exception:
+                pass
 
-        await browser.close()
+        if is_persistent:
+            await context.close()
+        else:
+            await browser.close()
 
     # Track in DB
     status = "applied" if result.get("success") else "failed"
@@ -848,8 +1089,19 @@ async def _apply_in_tab(
     """Apply to a single job using a new tab in an existing browser context."""
     page = await context.new_page()
     try:
-        await page.goto(job_url, wait_until="domcontentloaded", timeout=25_000)
-        await page.wait_for_timeout(2000)
+        # LinkedIn: navigate to search page with currentJobId for Easy Apply
+        if platform == "linkedin":
+            import re as _re
+            match = _re.search(r'/jobs/view/(\d+)', job_url) or _re.search(r'currentJobId=(\d+)', job_url)
+            if match:
+                nav_url = f"https://www.linkedin.com/jobs/search/?currentJobId={match.group(1)}&f_AL=true"
+            else:
+                nav_url = job_url
+            await page.goto(nav_url, wait_until="domcontentloaded", timeout=25_000)
+            await page.wait_for_timeout(4000)
+        else:
+            await page.goto(job_url, wait_until="domcontentloaded", timeout=25_000)
+            await page.wait_for_timeout(2000)
 
         if await _detect_captcha(page):
             return {"success": False, "error": "CAPTCHA detected", "captcha": True}
@@ -907,58 +1159,73 @@ async def bulk_apply(
                 "applied": [], "skipped": skipped, "failed": [],
             }
 
-        # One browser, one context, reuse for all jobs
-        async with async_playwright() as pw:
-            browser = await pw.firefox.launch(headless=False)
-            context = await browser.new_context(
-                user_agent=get_user_agent(),
-                viewport={"width": 1280, "height": 800},
-                locale="en-IN",
-                timezone_id="Asia/Kolkata",
-                ignore_https_errors=True,
+        # Split jobs: LinkedIn (persistent profile) vs others (shared context)
+        linkedin_jobs = [j for j in to_apply if j.get("platform") == "linkedin"]
+        other_jobs = [j for j in to_apply if j.get("platform") != "linkedin"]
+
+        async def _process_job(context, job, idx, total):
+            url = job["apply_url"]
+            plat = job["platform"]
+            title = job.get("title", "Unknown")
+            company = job.get("company", "Unknown")
+            logger.info("[%d/%d] Applying: %s @ %s", idx + 1, total, title, company)
+
+            result = await _apply_in_tab(
+                context, url, plat, cfg, job.get("cover_note", ""),
             )
-            # Load session cookies once
-            platforms_loaded = set()
-            for job in to_apply:
-                p = job.get("platform", "")
-                if p and p not in platforms_loaded:
-                    await load_cookies(context, p)
-                    platforms_loaded.add(p)
-
-            for i, job in enumerate(to_apply):
-                url = job["apply_url"]
-                platform = job["platform"]
-                title = job.get("title", "Unknown")
-                company = job.get("company", "Unknown")
-
-                logger.info("[%d/%d] Applying: %s @ %s", i + 1, len(to_apply), title, company)
-
-                result = await _apply_in_tab(
-                    context, url, platform, cfg, job.get("cover_note", ""),
+            status = "applied" if result.get("success") else "failed"
+            try:
+                record_application(
+                    job_title=title, company=company, platform=plat,
+                    job_url=url, status=status,
+                    confirmation=result.get("confirmation"),
+                    cover_note=job.get("cover_note") or None,
+                    match_score=job.get("match_score", 0),
                 )
+            except Exception:
+                pass
+            if result.get("success"):
+                applied.append({**job, **result})
+            else:
+                failed.append({**job, **result})
 
-                # Track in DB
-                status = "applied" if result.get("success") else "failed"
-                try:
-                    record_application(
-                        job_title=title, company=company, platform=platform,
-                        job_url=url, status=status,
-                        confirmation=result.get("confirmation"),
-                        cover_note=job.get("cover_note") or None,
-                        match_score=job.get("match_score", 0),
-                    )
-                except Exception:
-                    pass
+        async with async_playwright() as pw:
+            # --- LinkedIn jobs: persistent browser profile ---
+            if linkedin_jobs:
+                profile_dir = str(BROWSER_PROFILES_DIR / "linkedin")
+                Path(profile_dir).mkdir(parents=True, exist_ok=True)
+                li_ctx = await pw.firefox.launch_persistent_context(
+                    profile_dir, headless=False,
+                    viewport={"width": 1280, "height": 800},
+                )
+                for i, job in enumerate(linkedin_jobs):
+                    await _process_job(li_ctx, job, i, len(linkedin_jobs))
+                    if i < len(linkedin_jobs) - 1:
+                        await asyncio.sleep(random.uniform(5, 15))
+                await li_ctx.close()
 
-                if result.get("success"):
-                    applied.append({**job, **result})
-                else:
-                    failed.append({**job, **result})
+            # --- Other platform jobs: shared context ---
+            if other_jobs:
+                browser = await pw.firefox.launch(headless=False)
+                context = await browser.new_context(
+                    user_agent=get_user_agent(),
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                    ignore_https_errors=True,
+                )
+                platforms_loaded = set()
+                for job in other_jobs:
+                    p = job.get("platform", "")
+                    if p and p not in platforms_loaded:
+                        await load_cookies(context, p)
+                        platforms_loaded.add(p)
 
-                # Short delay — 5-15 seconds
-                if i < len(to_apply) - 1:
-                    delay = random.uniform(5, 15)
-                    await asyncio.sleep(delay)
+                for i, job in enumerate(other_jobs):
+                    await _process_job(context, job, i, len(other_jobs))
+                    if i < len(other_jobs) - 1:
+                        delay = random.uniform(5, 15)
+                        await asyncio.sleep(delay)
 
             # Save cookies once at end
             for p in platforms_loaded:
