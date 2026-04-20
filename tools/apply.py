@@ -502,11 +502,33 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
         for step in range(15):
             await page.wait_for_timeout(2000)
 
-            # Check if we're done
+            # Check if we're done — multiple success indicators
             text = (await page.inner_text("body")).lower()
             if "already applied" in text:
                 return {"success": True, "confirmation": "Already applied to this job on Naukri"}
-            if "application submitted" in text or "applied successfully" in text:
+            if any(kw in text for kw in (
+                "application submitted", "applied successfully",
+                "applied to", "thank you for applying",
+                "we have received your application",
+                "your application has been sent",
+                "successfully applied",
+            )):
+                return {"success": True, "confirmation": f"Naukri application submitted (answered {answered} questions)"}
+
+            # Check if chatbot is closed or no more interactive elements
+            chatbot_open = await page.evaluate("""() => {
+                const wrapper = document.querySelector('div.chatbot_DrawerContentWrapper');
+                if (!wrapper) return false;
+                if (wrapper.offsetParent === null) return false;
+                // Any interactive element?
+                const ce = wrapper.querySelector('div[contenteditable="true"]');
+                const radio = wrapper.querySelector('input[type="radio"]');
+                const textInput = wrapper.querySelector('input[type="text"], input[type="number"], textarea');
+                const file = wrapper.querySelector('input[type="file"]');
+                return !!(ce || radio || textInput || file);
+            }""")
+            if step > 0 and not chatbot_open:
+                # Chatbot closed or no more questions — successful application
                 return {"success": True, "confirmation": f"Naukri application submitted (answered {answered} questions)"}
 
             # --- Read the LAST chatbot question only ---
@@ -580,25 +602,26 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
 
             if has_contenteditable:
                 value = ""
-                # Yes/No text questions (comfortable, willing, ready, interview, etc.)
                 import re as _re
-                if _re.search(r"comfortable|willing|ready|agree|face to face|f2f|interview|onsite|in.person|office|relocat|do you|are you|can you|have you", question):
-                    value = "Yes"
-                elif "current" in question and "ctc" in question:
+                # ORDER MATTERS: Check specific data fields BEFORE generic yes/no patterns.
+                # CTC questions
+                if "current" in question and "ctc" in question:
                     value = af.get("current_ctc", "9")
                 elif "expected" in question and "ctc" in question:
                     value = af.get("expected_ctc", "16")
                 elif "ctc" in question or "salary" in question or "lpa" in question or "compensation" in question:
                     value = af.get("current_ctc", "9") if "current" in question or "present" in question else af.get("expected_ctc", "16")
-                elif "experience" in question or "years" in question:
+                # Experience questions (including "how many years of experience do you have in X")
+                elif "experience" in question or "years" in question or ("year" in question and "exp" in question):
                     value = af.get("total_experience", "3.9")
+                    # Match specific tech keywords first
                     for kw, yrs in exp_map.items():
                         if kw in question:
                             value = yrs
                             break
                 elif "notice" in question:
                     value = "0"
-                elif "name" in question:
+                elif "name" in question and "company" not in question:
                     value = cfg.name
                 elif "email" in question:
                     value = cfg.email
@@ -609,6 +632,9 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                     value = pref[0] if pref else cfg.location
                 elif "age" in question:
                     value = "25"
+                # Yes/No text questions (AFTER specific data fields) — narrower patterns
+                elif _re.search(r"comfortable|willing|ready|agree to|face to face|f2f|onsite|in.person|office|relocat|can you join|ok with|okay with", question):
+                    value = "Yes"
 
                 if value:
                     # Click the contenteditable, clear it, type via keyboard
