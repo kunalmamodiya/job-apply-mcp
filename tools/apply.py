@@ -565,7 +565,18 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                     let chosen = null;
 
                     if (/immediate|joiner|notice|join/.test(q)) {
-                        chosen = options.find(o => o.value === '0') || options[0];
+                        // Find closest option to notice period (default 15 days)
+                        const noticeStr = af.notice_period || '15 days';
+                        const targetDays = parseInt(noticeStr.match(/\\d+/)?.[0] || '15');
+                        let best = null, bestDiff = 999;
+                        options.forEach(o => {
+                            const n = parseInt(o.value);
+                            if (!isNaN(n) && Math.abs(n - targetDays) < bestDiff) {
+                                bestDiff = Math.abs(n - targetDays);
+                                best = o;
+                            }
+                        });
+                        chosen = best || options[0];
                     } else if (/gender/.test(q)) {
                         const target = (af.gender || 'male').toLowerCase();
                         chosen = options.find(o => o.label.includes(target)) || options[0];
@@ -620,7 +631,24 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                             value = yrs
                             break
                 elif "notice" in question:
-                    value = "0"
+                    notice = af.get("notice_period", "15 days")
+                    # If it's a text input, type the full string. If asking days as number, extract digits.
+                    if "day" in question or "how many" in question:
+                        # Extract number from "15 days" → "15"
+                        import re as _r2
+                        m = _r2.search(r"\d+", notice)
+                        value = m.group(0) if m else notice
+                    else:
+                        value = notice
+                # Last Working Day (LWD) questions
+                elif _re.search(r"last working day|lwd|last day|when.*leave|when.*available|when.*join", question):
+                    value = af.get("last_working_day", "Currently Working")
+                # Primary cloud / preferred cloud questions
+                elif _re.search(r"primary cloud|preferred cloud|main cloud|cloud platform|which cloud", question):
+                    value = af.get("primary_cloud", "GCP")
+                # Contract / contract-based hiring questions
+                elif _re.search(r"contract|contractual|c2h|contract.based|contract to hire|contract role|short term", question):
+                    value = af.get("contract_based", "Yes")
                 elif "name" in question and "company" not in question:
                     value = cfg.name
                 elif "email" in question:
