@@ -11,20 +11,24 @@ from difflib import SequenceMatcher
 
 @dataclass(frozen=True)
 class CandidateProfile:
+    """
+    Default candidate profile — DevOps / AI-ML Engineer template.
+    Users override these values via ~/.job-apply-mcp/config.json
+    """
     title: str = "DevOps and AI/ML Engineer"
     experience_years: int = 4
-    location: str = "Jaipur, India"
+    location: str = "India"
     preferred_locations: tuple[str, ...] = (
         "Remote",
-        "Jaipur",
-        "Noida",
-        "Gurgaon",
-        "Gurugram",
         "Bangalore",
         "Bengaluru",
         "Hyderabad",
         "Pune",
-        "Remote",
+        "Delhi",
+        "Mumbai",
+        "Noida",
+        "Gurgaon",
+        "Gurugram",
     )
     skills: tuple[str, ...] = (
         "GCP",
@@ -168,7 +172,7 @@ def compute_match_score(
                 location_score = 1.0
                 break
         if location_score == 0.0 and "india" in norm_location:
-            location_score = 0.5
+            location_score = 1.0
 
     # --- Avoid penalty (10%) ---
     avoid_penalty = 0.0
