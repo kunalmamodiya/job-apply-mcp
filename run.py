@@ -45,9 +45,9 @@ def get_keywords():
     raw = input("  Custom keywords (or press Enter for defaults): ").strip()
     if not raw:
         return [
-            "DevOps Engineer", "MLOps Engineer", "Cloud Engineer",
-            "SRE Engineer", "Platform Engineer", "Kubernetes Engineer",
-            "CI CD Engineer", "GenAI Engineer", "LLMOps Engineer",
+            "DevOps Engineer", "Senior DevOps Engineer", "Cloud Engineer",
+            "SRE Engineer", "Platform Engineer", "AWS Cloud Engineer",
+            "Site Reliability Engineer", "AI DevOps Engineer",
         ]
     return [k.strip() for k in raw.split(",")]
 
