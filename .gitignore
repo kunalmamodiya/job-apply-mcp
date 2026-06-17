@@ -6,3 +6,4 @@ __pycache__/
 applications.db
 sessions/
 ~/.job-apply-mcp/
+.kiro/
