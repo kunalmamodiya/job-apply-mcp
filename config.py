@@ -25,8 +25,8 @@ SESSIONS_DIR = APP_DIR / "sessions"
 DB_PATH = APP_DIR / "applications.db"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "resume_path": "/Users/pulkit.jain8004/Downloads/files/PulkitJain_Resume.pdf",
-    "name": "Pulkit Jain",
+    "resume_path": "",
+    "name": "",
     "email": "",
     "phone": "",
     "location": "Jaipur, India",

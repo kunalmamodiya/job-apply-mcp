@@ -18,14 +18,7 @@ from config import SESSIONS_DIR, ensure_dirs, get_user_agent
 logger = logging.getLogger(__name__)
 
 PLATFORM_LOGIN_URLS: dict[str, str] = {
-    "linkedin": "https://www.linkedin.com/login",
     "naukri": "https://www.naukri.com/mnjuser/login",
-    "wellfound": "https://wellfound.com/login",
-    "indeed": "https://secure.indeed.com/auth",
-    "hirist": "https://www.hirist.tech/login",
-    "glassdoor": "https://www.glassdoor.co.in/profile/login_input.htm",
-    "instahyre": "https://www.instahyre.com/login/",
-    "cutshort": "https://cutshort.io/login",
 }
 
 SUPPORTED_PLATFORMS = tuple(PLATFORM_LOGIN_URLS.keys())

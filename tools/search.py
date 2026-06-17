@@ -94,16 +94,6 @@ class JobResult:
 # Per-platform search URL builders
 # ---------------------------------------------------------------------------
 
-def _linkedin_url(keywords: str, location: str, experience: int) -> str:
-    params = {
-        "keywords": keywords,
-        "location": location,
-        "f_E": "2,3,4",  # entry/associate/mid-senior
-        "sortBy": "R",
-    }
-    return "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode(params)
-
-
 def _naukri_url(keywords: str, location: str, experience: int) -> str:
     kw_slug = keywords.lower().replace(" ", "-").replace(",", "-")
     loc_slug = location.lower().replace(" ", "-").replace(",", "")
@@ -117,45 +107,8 @@ def _naukri_url(keywords: str, location: str, experience: int) -> str:
     )
 
 
-def _wellfound_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "location": location}
-    return "https://wellfound.com/jobs?" + urllib.parse.urlencode(params)
-
-
-def _indeed_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "l": location, "fromage": "14"}
-    return "https://in.indeed.com/jobs?" + urllib.parse.urlencode(params)
-
-
-def _hirist_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "loc": location, "exp": str(experience)}
-    return "https://www.hirist.tech/jobs?" + urllib.parse.urlencode(params)
-
-
-def _glassdoor_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "l": location}
-    return "https://www.glassdoor.co.in/Job/jobs.htm?" + urllib.parse.urlencode(params)
-
-
-def _instahyre_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "location": location, "experience": str(experience)}
-    return "https://www.instahyre.com/search-jobs/?" + urllib.parse.urlencode(params)
-
-
-def _cutshort_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "location": location, "experience": f"{experience}-{experience + 2}"}
-    return "https://cutshort.io/jobs?" + urllib.parse.urlencode(params)
-
-
 PLATFORM_BUILDERS: dict[str, Any] = {
-    "linkedin": _linkedin_url,
     "naukri": _naukri_url,
-    "wellfound": _wellfound_url,
-    "indeed": _indeed_url,
-    "hirist": _hirist_url,
-    "glassdoor": _glassdoor_url,
-    "instahyre": _instahyre_url,
-    "cutshort": _cutshort_url,
 }
 
 # ---------------------------------------------------------------------------
@@ -176,57 +129,14 @@ async def _detect_captcha(page: Page) -> bool:
     return any(f" {ind}" in f" {text}" or text.startswith(ind) for ind in indicators)
 
 
-async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on LinkedIn — skipping")
-            return [JobResult(
-                title="[CAPTCHA] LinkedIn requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="linkedin",
-            )]
-        await page.wait_for_timeout(2000)
-
-        cards = await page.query_selector_all(
-            "div.job-search-card, li.jobs-search-results__list-item, div.base-card"
-        )
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "h3.base-search-card__title, a.job-card-list__title, h3"
-            )
-            company_el = await card.query_selector(
-                "h4.base-search-card__subtitle, a.job-card-container__company-name, h4"
-            )
-            location_el = await card.query_selector(
-                "span.job-search-card__location, li.job-card-container__metadata-item, span"
-            )
-            link_el = await card.query_selector("a[href*='/jobs/view'], a[href*='linkedin.com/jobs']")
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            href = await link_el.get_attribute("href") if link_el else ""
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary="Not listed", apply_url=href or url,
-                    match_score=score, platform="linkedin",
-                ))
-    except Exception as exc:
-        logger.error("LinkedIn scrape error: %s", exc)
-    return results
-
 
 async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
     """
     Scrape Naukri by intercepting its internal /jobapi/v3/search JSON API.
-    Only returns **easy-apply** jobs (companyApplyJob == False).
+    Fetches multiple pages. Only returns **easy-apply** jobs.
     """
     results: list[JobResult] = []
+    all_api_jobs: list[dict] = []
     api_data: dict | None = None
 
     async def _intercept(route, request):
@@ -241,26 +151,47 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
 
     try:
         await page.context.route("**/jobapi/**", _intercept)
-        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        await page.wait_for_timeout(5000)
 
-        if not api_data or "jobDetails" not in api_data:
-            logger.warning("Naukri: could not capture job API data")
-            return results
+        # Fetch up to 5 pages (20 jobs each = 100 jobs max per keyword)
+        for page_num in range(1, 6):
+            api_data = None
+            page_url = url if page_num == 1 else f"{url}&pageNo={page_num}"
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=45_000)
+            await page.wait_for_timeout(4000)
 
-        jobs = api_data["jobDetails"]
-        logger.info("Naukri API: %d jobs returned", len(jobs))
+            if not api_data or "jobDetails" not in api_data:
+                break  # No more pages
 
-        for job in jobs:
+            page_jobs = api_data["jobDetails"]
+            if not page_jobs:
+                break  # Empty page
+
+            all_api_jobs.extend(page_jobs)
+            logger.info("Naukri page %d: %d jobs (total so far: %d)", page_num, len(page_jobs), len(all_api_jobs))
+
+            # Stop if we got fewer than 20 (last page)
+            if len(page_jobs) < 20:
+                break
+
+        logger.info("Naukri API total: %d jobs across pages", len(all_api_jobs))
+
+        for job in all_api_jobs:
             # --- Filter: only easy/direct apply ---
             if job.get("companyApplyJob", False):
                 continue  # skip external "Apply on company site"
 
             # --- Filter: skip jobs older than 30 days ---
             created = job.get("createdDate", "")
-            days_ago = _parse_days_ago(created) if created else -1
-            if days_ago == -1:
-                days_ago = _date_to_days_ago(created)
+            days_ago = -1
+            if isinstance(created, (int, float)) and created > 0:
+                # Epoch timestamp (seconds or milliseconds)
+                ts = created if created < 1e11 else created / 1000
+                delta = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
+                days_ago = max(0, delta.days)
+            elif isinstance(created, str) and created:
+                days_ago = _parse_days_ago(created)
+                if days_ago == -1:
+                    days_ago = _date_to_days_ago(created)
             if days_ago > 30:
                 continue
 
@@ -303,418 +234,8 @@ async def _scrape_naukri(page: Page, url: str) -> list[JobResult]:
     return results
 
 
-async def _scrape_wellfound(page: Page, url: str) -> list[JobResult]:
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Wellfound — skipping")
-            return [JobResult(
-                title="[CAPTCHA] Wellfound requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="wellfound",
-            )]
-        await page.wait_for_timeout(2000)
-
-        cards = await page.query_selector_all(
-            "div[class*='JobSearchResult'], div[class*='job-listing'], div[data-test='JobListing']"
-        )
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "a[class*='jobTitle'], h2 a, a[data-test='job-title']"
-            )
-            company_el = await card.query_selector(
-                "a[class*='company'], h2[class*='company'], a[data-test='startup-link']"
-            )
-            location_el = await card.query_selector(
-                "span[class*='location'], span[data-test='location']"
-            )
-            salary_el = await card.query_selector(
-                "span[class*='salary'], span[data-test='compensation']"
-            )
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-            href = await title_el.get_attribute("href") if title_el else ""
-            if href and not href.startswith("http"):
-                href = "https://wellfound.com" + href
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="wellfound",
-                ))
-    except Exception as exc:
-        logger.error("Wellfound scrape error: %s", exc)
-    return results
-
-
-async def _scrape_indeed(page: Page, url: str) -> list[JobResult]:
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Indeed — skipping")
-            return [JobResult(
-                title="[CAPTCHA] Indeed requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="indeed",
-            )]
-        await page.wait_for_timeout(2000)
-
-        cards = await page.query_selector_all(
-            "div.job_seen_beacon, div.jobsearch-SerpJobCard, td.resultContent"
-        )
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "h2.jobTitle a, a[data-jk], span[title]"
-            )
-            company_el = await card.query_selector(
-                "span[data-testid='company-name'], span.companyName, span.company"
-            )
-            location_el = await card.query_selector(
-                "div[data-testid='text-location'], div.companyLocation, span.location"
-            )
-            salary_el = await card.query_selector(
-                "div.salary-snippet-container, span.salary-snippet, div.metadata.salary-snippet-container"
-            )
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-
-            href = ""
-            if title_el:
-                href = await title_el.get_attribute("href") or ""
-            if href and not href.startswith("http"):
-                href = "https://in.indeed.com" + href
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="indeed",
-                ))
-    except Exception as exc:
-        logger.error("Indeed scrape error: %s", exc)
-    return results
-
-
-async def _scrape_hirist(page: Page, url: str) -> list[JobResult]:
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Hirist — skipping")
-            return [JobResult(
-                title="[CAPTCHA] Hirist requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="hirist",
-            )]
-        await page.wait_for_timeout(2000)
-
-        cards = await page.query_selector_all(
-            "div.job-card, div[class*='jobCard'], div.job-listing"
-        )
-        for card in cards[:25]:
-            title_el = await card.query_selector("a[class*='title'], h3 a, a.job-title")
-            company_el = await card.query_selector("span.company-name, a.company, div.company")
-            location_el = await card.query_selector("span.location, div.location")
-            salary_el = await card.query_selector("span.salary, div.salary")
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-            href = await title_el.get_attribute("href") if title_el else ""
-            if href and not href.startswith("http"):
-                href = "https://www.hirist.tech" + href
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="hirist",
-                ))
-    except Exception as exc:
-        logger.error("Hirist scrape error: %s", exc)
-    return results
-
-
-async def _scrape_glassdoor(page: Page, url: str) -> list[JobResult]:
-    """Scrape Glassdoor job listings."""
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        await page.wait_for_timeout(4000)
-
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Glassdoor")
-            return [JobResult(
-                title="[CAPTCHA] Glassdoor requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="glassdoor",
-            )]
-
-        # Glassdoor job cards — try multiple selector patterns
-        card_selectors = [
-            "li[data-test='jobListing']",
-            "li.JobsList_jobListItem__wjTHv",
-            "li[class*='JobListItem']",
-            "li[class*='react-job-listing']",
-            "div[data-test='job-card']",
-        ]
-        cards = []
-        for sel in card_selectors:
-            cards = await page.query_selector_all(sel)
-            if cards:
-                logger.info("Glassdoor: matched %d cards with '%s'", len(cards), sel)
-                break
-
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "a[data-test='job-link'], a[class*='JobCard_jobTitle'], "
-                "a[class*='jobTitle'], a[href*='/job-listing/']"
-            )
-            company_el = await card.query_selector(
-                "span[class*='EmployerProfile_compactEmployerName'], "
-                "div[data-test='emp-name'], span[class*='companyName']"
-            )
-            location_el = await card.query_selector(
-                "div[data-test='emp-location'], span[class*='location'], "
-                "div[class*='JobCard_location']"
-            )
-            salary_el = await card.query_selector(
-                "div[data-test='detailSalary'], span[class*='salary'], "
-                "div[class*='JobCard_salary']"
-            )
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-            href = await title_el.get_attribute("href") if title_el else ""
-            if href and not href.startswith("http"):
-                href = "https://www.glassdoor.co.in" + href
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="glassdoor",
-                ))
-
-        # Fallback: extract from all job-listing links
-        if not results:
-            links = await page.query_selector_all("a[href*='/job-listing/']")
-            for link in links[:25]:
-                href = await link.get_attribute("href") or ""
-                text = (await link.inner_text()).strip()
-                if text and len(text) > 3:
-                    if not href.startswith("http"):
-                        href = "https://www.glassdoor.co.in" + href
-                    score = compute_match_score(text, "", "India")
-                    results.append(JobResult(
-                        title=text, company="", location="India",
-                        salary="Not listed", apply_url=href or url,
-                        match_score=score, platform="glassdoor",
-                    ))
-    except Exception as exc:
-        logger.error("Glassdoor scrape error: %s", exc)
-    return results
-
-
-async def _scrape_instahyre(page: Page, url: str) -> list[JobResult]:
-    """Scrape Instahyre job listings."""
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        await page.wait_for_timeout(4000)
-
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Instahyre")
-            return [JobResult(
-                title="[CAPTCHA] Instahyre requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="instahyre",
-            )]
-
-        # Instahyre job cards
-        card_selectors = [
-            "div.opportunity-card",
-            "div[class*='opportunity']",
-            "div[class*='job-card']",
-            "div[class*='JobCard']",
-            "div.card[class*='job']",
-        ]
-        cards = []
-        for sel in card_selectors:
-            cards = await page.query_selector_all(sel)
-            if cards:
-                logger.info("Instahyre: matched %d cards with '%s'", len(cards), sel)
-                break
-
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "a[class*='opportunity-title'], h3 a, a[class*='title'], "
-                "div[class*='title'] a, a[href*='/opportunity/']"
-            )
-            company_el = await card.query_selector(
-                "div[class*='company-name'], span[class*='company'], "
-                "a[class*='company'], div[class*='companyName']"
-            )
-            location_el = await card.query_selector(
-                "div[class*='location'], span[class*='location'], "
-                "span[class*='city']"
-            )
-            salary_el = await card.query_selector(
-                "div[class*='salary'], span[class*='salary'], "
-                "div[class*='compensation']"
-            )
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-            href = await title_el.get_attribute("href") if title_el else ""
-            if href and not href.startswith("http"):
-                href = "https://www.instahyre.com" + href
-
-            if title:
-                score = compute_match_score(title, "", location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="instahyre",
-                ))
-
-        # Fallback: link extraction
-        if not results:
-            links = await page.query_selector_all("a[href*='/opportunity/']")
-            for link in links[:25]:
-                href = await link.get_attribute("href") or ""
-                text = (await link.inner_text()).strip()
-                if text and len(text) > 3:
-                    if not href.startswith("http"):
-                        href = "https://www.instahyre.com" + href
-                    score = compute_match_score(text, "", "India")
-                    results.append(JobResult(
-                        title=text, company="", location="India",
-                        salary="Not listed", apply_url=href or url,
-                        match_score=score, platform="instahyre",
-                    ))
-    except Exception as exc:
-        logger.error("Instahyre scrape error: %s", exc)
-    return results
-
-
-async def _scrape_cutshort(page: Page, url: str) -> list[JobResult]:
-    """Scrape Cutshort job listings."""
-    results: list[JobResult] = []
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        await page.wait_for_timeout(4000)
-
-        if await _detect_captcha(page):
-            logger.warning("CAPTCHA detected on Cutshort")
-            return [JobResult(
-                title="[CAPTCHA] Cutshort requires manual verification",
-                company="", location="", salary="", apply_url=url,
-                match_score=0, platform="cutshort",
-            )]
-
-        # Cutshort job cards
-        card_selectors = [
-            "div[class*='job-card']",
-            "div[class*='JobCard']",
-            "div[class*='jobCard']",
-            "a[class*='job-card']",
-            "div[class*='opportunity-card']",
-            "div[class*='listing-card']",
-        ]
-        cards = []
-        for sel in card_selectors:
-            cards = await page.query_selector_all(sel)
-            if cards:
-                logger.info("Cutshort: matched %d cards with '%s'", len(cards), sel)
-                break
-
-        for card in cards[:25]:
-            title_el = await card.query_selector(
-                "a[class*='title'], h3 a, h2 a, "
-                "div[class*='title'] a, a[href*='/job/']"
-            )
-            company_el = await card.query_selector(
-                "div[class*='company'], span[class*='company'], "
-                "a[class*='company'], p[class*='company']"
-            )
-            location_el = await card.query_selector(
-                "div[class*='location'], span[class*='location'], "
-                "span[class*='city']"
-            )
-            salary_el = await card.query_selector(
-                "div[class*='salary'], span[class*='salary'], "
-                "div[class*='compensation'], span[class*='ctc']"
-            )
-            skills_el = await card.query_selector(
-                "div[class*='skills'], div[class*='tags'], "
-                "div[class*='tech-stack']"
-            )
-
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            company = (await company_el.inner_text()).strip() if company_el else ""
-            location = (await location_el.inner_text()).strip() if location_el else ""
-            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
-            skills_text = (await skills_el.inner_text()).strip() if skills_el else ""
-            href = await title_el.get_attribute("href") if title_el else ""
-            if href and not href.startswith("http"):
-                href = "https://cutshort.io" + href
-
-            if title:
-                score = compute_match_score(title, skills_text, location)
-                results.append(JobResult(
-                    title=title, company=company, location=location,
-                    salary=salary, apply_url=href or url,
-                    match_score=score, platform="cutshort",
-                ))
-
-        # Fallback: link extraction
-        if not results:
-            links = await page.query_selector_all("a[href*='/job/']")
-            for link in links[:25]:
-                href = await link.get_attribute("href") or ""
-                text = (await link.inner_text()).strip()
-                if text and len(text) > 3 and "/job/" in href:
-                    if not href.startswith("http"):
-                        href = "https://cutshort.io" + href
-                    score = compute_match_score(text, "", "India")
-                    results.append(JobResult(
-                        title=text, company="", location="India",
-                        salary="Not listed", apply_url=href or url,
-                        match_score=score, platform="cutshort",
-                    ))
-    except Exception as exc:
-        logger.error("Cutshort scrape error: %s", exc)
-    return results
-
-
 PLATFORM_SCRAPERS = {
-    "linkedin": _scrape_linkedin,
     "naukri": _scrape_naukri,
-    "wellfound": _scrape_wellfound,
-    "indeed": _scrape_indeed,
-    "hirist": _scrape_hirist,
-    "glassdoor": _scrape_glassdoor,
-    "instahyre": _scrape_instahyre,
-    "cutshort": _scrape_cutshort,
 }
 
 # ---------------------------------------------------------------------------
@@ -726,11 +247,10 @@ async def search_jobs(
     location: str = "India",
     experience_years: int = 3,
     remote: bool = False,
-    platforms: list[str] | None = None,
+    platforms: list[str] | None = None,  # kept for backwards-compat; ignored
 ) -> list[dict[str, Any]]:
     """
-    Search job platforms concurrently and return merged results.
-    If *platforms* is given, only search those (e.g. ["naukri"]).
+    Search Naukri.com for easy-apply jobs and return merged results.
     """
     if not keywords:
         keywords = list(PROFILE.default_search_keywords)
@@ -739,15 +259,9 @@ async def search_jobs(
     if remote:
         kw_string += " remote"
 
-    # Determine which platforms to search
-    active_platforms = (
-        [p for p in platforms if p in PLATFORM_SCRAPERS]
-        if platforms
-        else list(PLATFORM_SCRAPERS.keys())
-    )
+    platform_results: list = []
 
     async with async_playwright() as pw:
-        # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
         browser = await pw.firefox.launch(headless=False)
         context = await browser.new_context(
             user_agent=get_user_agent(),
@@ -756,27 +270,18 @@ async def search_jobs(
             timezone_id="Asia/Kolkata",
             ignore_https_errors=True,
         )
+        await load_cookies(context, "naukri")
 
-        # Load any saved sessions
-        for platform in active_platforms:
-            await load_cookies(context, platform)
-
-        # Build URLs
-        urls: dict[str, str] = {}
-        for platform in active_platforms:
-            urls[platform] = PLATFORM_BUILDERS[platform](kw_string, location, experience_years)
-
-        # Scrape concurrently — one page per platform
-        async def _run(platform: str) -> list[JobResult]:
-            page = await context.new_page()
-            try:
-                scraper = PLATFORM_SCRAPERS[platform]
-                return await scraper(page, urls[platform])
-            finally:
-                await page.close()
-
-        tasks = [_run(p) for p in active_platforms]
-        platform_results = await asyncio.gather(*tasks, return_exceptions=True)
+        url = PLATFORM_BUILDERS["naukri"](kw_string, location, experience_years)
+        page = await context.new_page()
+        try:
+            results = await _scrape_naukri(page, url)
+            platform_results.append(results)
+        except Exception as exc:
+            logger.error("Naukri scrape failed: %s", exc)
+            platform_results.append(exc)
+        finally:
+            await page.close()
 
         await browser.close()
 
@@ -818,4 +323,4 @@ def filter_jobs(
         filtered.append(job)
 
     filtered.sort(key=lambda j: j.get("match_score", 0), reverse=True)
-    return filtered[:20]
+    return filtered[:50]
