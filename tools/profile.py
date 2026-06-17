@@ -15,7 +15,7 @@ class CandidateProfile:
     Default candidate profile — DevOps / AI-ML Engineer template.
     Users override these values via ~/.job-apply-mcp/config.json
     """
-    title: str = "DevOps and AI/ML Engineer"
+    title: str = "DevOps and Site Reliability Engineer"
     experience_years: int = 4
     location: str = "India"
     preferred_locations: tuple[str, ...] = (
@@ -31,59 +31,51 @@ class CandidateProfile:
         "Gurugram",
     )
     skills: tuple[str, ...] = (
-        "GCP",
+        "AWS",
         "Azure",
         "Terraform",
+        "CloudFormation",
         "Kubernetes",
         "Docker",
+        "Helm",
         "GitLab CI/CD",
+        "Github Actions",
         "Jenkins",
         "Azure DevOps",
         "Prometheus",
         "Grafana",
+        "ELK stack",
         "Python",
         "Bash",
         "PowerShell",
-        "Ollama",
-        "RAG",
-        "LangChain",
-        "QLoRA",
-        "LoRA",
         "MCP Tools",
-        "FAISS",
-        "ChromaDB",
-        "LLMs",
-        "NLP",
         "Generative AI",
         "SonarQube",
         "Trivy",
         "SBOM",
-        "Cloud SQL",
-        "BigQuery",
         "Secret Manager",
         "IAM",
+        "EKS",
         "AKS",
-        "GKE",
         "Fargate",
     )
     target_roles: tuple[str, ...] = (
-        "MLOps Engineer",
-        "LLMOps Engineer",
-        "Platform Engineer GenAI",
         "DevOps Engineer",
+        "Senior DevOps Engineer",
+        "Platform Engineer",
         "Site Reliability Engineer",
-        "AI Platform Engineer",
         "Cloud DevOps Engineer",
-        "GenAI Infrastructure Engineer",
+        "Cloud Engineer",
+        "AWS Cloud Engineer",
+        "AI Platform Engineer",
     )
     default_search_keywords: tuple[str, ...] = (
         "DevOps Engineer",
-        "MLOps Engineer",
-        "LLMOps Engineer",
-        "Platform Engineer GenAI",
-        "Cloud DevOps AI",
-        "GenAI Infrastructure Engineer",
+        "Senior DevOps Engineer",
+        "Platform Engineer",
+        "AWS Cloud Engineer",
         "Site Reliability Engineer",
+        "Cloud DevOps AI",
     )
     avoid_keywords: tuple[str, ...] = (
         "frontend",
