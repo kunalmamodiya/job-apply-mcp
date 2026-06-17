@@ -262,7 +262,7 @@ async def search_jobs(
     platform_results: list = []
 
     async with async_playwright() as pw:
-        browser = await pw.firefox.launch(headless=False)
+        browser = await pw.chromium.launch(channel="chrome", headless=False)
         context = await browser.new_context(
             user_agent=get_user_agent(),
             viewport={"width": 1280, "height": 800},

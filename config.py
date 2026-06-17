@@ -97,20 +97,20 @@ def save_config(config: AppConfig) -> None:
 
 
 def get_user_agent() -> str:
-    """Return a Firefox user-agent string matching the current OS."""
+    """Return a Google Chrome user-agent string matching the current OS."""
     os_name = platform.system()
     if os_name == "Windows":
         return (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
-            "Gecko/20100101 Firefox/128.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
     elif os_name == "Darwin":
         return (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) "
-            "Gecko/20100101 Firefox/128.0"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
     else:
         return (
-            "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
-            "Gecko/20100101 Firefox/128.0"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )

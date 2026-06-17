@@ -80,7 +80,7 @@ async def interactive_login(platform: str) -> dict[str, Any]:
 
     async with async_playwright() as pw:
         # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites
-        browser = await pw.firefox.launch(headless=False)
+        browser = await pw.chromium.launch(channel="chrome", headless=False)
         context = await browser.new_context(
             user_agent=get_user_agent(),
             viewport={"width": 1280, "height": 800},
