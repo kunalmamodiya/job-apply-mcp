@@ -702,6 +702,11 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                 # Yes/No text questions (AFTER specific data fields & negatives) — narrower patterns
                 elif _re.search(r"comfortable|willing|ready|agree to|face to face|f2f|onsite|in.person|office|can you join|ok with|okay with", question):
                     value = "Yes"
+                elif _re.search(r"certified|\bcert\b|\bcertificate\b", question):
+                    value = "Yes"
+                elif _re.search(r"do you|are you|have you|can you|will you|would you", question):
+                    value = "Yes"
+
 
                 if value:
                     # Click the contenteditable, clear it, type via keyboard
