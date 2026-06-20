@@ -72,6 +72,11 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
         "preferred city": preferred_city,
         "location": current_city,
         "city": current_city,
+        "certifications": af.get("certifications", ""),
+        "certification": af.get("certifications", ""),
+        "certificate": af.get("certifications", ""),
+        "certificates": af.get("certifications", ""),
+        "certified": af.get("certifications", ""),
     }
     # Add experience keywords
     for k, v in af.get("experience", {}).items():
@@ -181,6 +186,8 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
                 chosen = options.find(o => o.text.includes(target));
             } else if (ctx.includes("experience") || ctx.includes("exp")) {
                 chosen = options.find(o => /[34]/.test(o.text));
+            } else if (/certified|certificat|certification|\bcert\b/.test(ctx)) {
+                chosen = options.find(o => /^yes$|\byes\b/i.test(o.text));
             }
 
             if (chosen) {
@@ -210,6 +217,8 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
             } else if (ctx.includes("gender")) {
                 const target = (answers.gender || "male").toLowerCase();
                 match = group.find(r => r.value.includes(target) || r.label.includes(target));
+            } else if (/certified|certificat|certification|\bcert\b/.test(ctx)) {
+                match = group.find(r => /^yes$|\byes\b/i.test(r.label) || /^yes$|\byes\b/i.test(r.value));
             } else if (/current|present|home/.test(ctx) && (ctx.includes("location") || ctx.includes("city"))) {
                 const target = (config.currentCity || "").toLowerCase();
                 if (target) match = group.find(r => r.value.includes(target) || r.label.includes(target));
@@ -581,6 +590,8 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                         chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
                     } else if (/offer.*hand|in.*hand.*offer|any.*offer|active offer|other offer|counter.*offer|competing offer/.test(q)) {
                         chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
+                    } else if (/certified|certificat|certification|\bcert\b/.test(q)) {
+                        chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
                     }
                     if (!chosen) {
                         chosen = options.find(o => o.label.includes('skip')) || options[0];
@@ -702,8 +713,8 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                 # Yes/No text questions (AFTER specific data fields & negatives) — narrower patterns
                 elif _re.search(r"comfortable|willing|ready|agree to|face to face|f2f|onsite|in.person|office|can you join|ok with|okay with", question):
                     value = "Yes"
-                elif _re.search(r"certified|\bcert\b|\bcertificate\b", question):
-                    value = "Yes"
+                elif _re.search(r"certified|certification|certificate|certificates|\bcert\b", question):
+                    value = af.get("certifications", "AWS solutions architect associate and AWS cloudops enginerr associate and AWS AI Practitioner")
                 elif _re.search(r"do you|are you|have you|can you|will you|would you", question):
                     value = "Yes"
 
