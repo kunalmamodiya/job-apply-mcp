@@ -87,6 +87,7 @@ async def do_search_and_apply():
         print(f"    {kw:30s} +{len(jobs):2d}  total={len(all_jobs)}")
 
     filtered = filter_jobs(all_jobs, min_match_score=0.25)
+    # filtered = filter_jobs(all_jobs, min_match_score=0.25, max_days_old=10)
     print(f"\n  Found {len(all_jobs)} jobs, {len(filtered)} after filtering")
 
     if not filtered:
@@ -137,7 +138,7 @@ async def do_search_only():
                 seen.add(j["apply_url"])
                 all_jobs.append(j)
 
-    filtered = filter_jobs(all_jobs, min_match_score=0.25)
+    filtered = filter_jobs(all_jobs, min_match_score=0.25, max_days_old=10)
     print(f"\n  Found {len(all_jobs)} jobs, {len(filtered)} after filtering\n")
     for i, j in enumerate(filtered, 1):
         days = j.get("posted_days_ago", -1)
