@@ -46,8 +46,8 @@ def get_keywords():
     if not raw:
         return [
             "DevOps Engineer", "Senior DevOps Engineer", "Cloud Engineer",
-            "SRE Engineer", "Platform Engineer", "AWS Cloud Engineer",
-            "Site Reliability Engineer", "AI DevOps Engineer",
+            "SRE Engineer", "Site Reliability Engineer", "AWS Cloud Engineer",
+            "Platform Engineer", "AI DevOps Engineer",
         ]
     return [k.strip() for k in raw.split(",")]
 
