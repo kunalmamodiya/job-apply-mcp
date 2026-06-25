@@ -77,6 +77,8 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
         "certificate": af.get("certifications", ""),
         "certificates": af.get("certifications", ""),
         "certified": af.get("certifications", ""),
+        "military spouse": "No",
+        "military partner": "No",
     }
     # Add experience keywords
     for k, v in af.get("experience", {}).items():
@@ -85,7 +87,7 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
     pref_locs = af.get("preferred_locations", [])
 
     # ---- Use JavaScript to find and fill all visible fields ----
-    filled = await page.evaluate('''(config) => {
+    filled = await page.evaluate(r'''(config) => {
         const answers = config.answers;
         const prefLocs = config.prefLocs;
         let filled = 0;
@@ -185,9 +187,14 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
                 const target = (answers.notice_period || "immediate").toLowerCase();
                 chosen = options.find(o => o.text.includes(target));
             } else if (ctx.includes("experience") || ctx.includes("exp")) {
-                chosen = options.find(o => /[34]/.test(o.text));
+                const candidates = options.filter(o => !/fresher|no experience|\b0\b/i.test(o.text));
+                chosen = candidates.find(o => /\b4\b|3.*5|3\s*-\s*5|3\s*to\s*5/.test(o.text)) ||
+                         candidates.find(o => /[34]/.test(o.text)) ||
+                         candidates[0] || options[0];
             } else if (/certified|certificat|certification|\bcert\b/.test(ctx)) {
                 chosen = options.find(o => /^yes$|\byes\b/i.test(o.text));
+            } else if (/mil.*spouse|mil.*partner/.test(ctx)) {
+                chosen = options.find(o => /not\s*a\s*military|non-military|not\s*a\s*spouse|no\b|not\b/i.test(o.text));
             }
 
             if (chosen) {
@@ -219,12 +226,19 @@ async def _autofill_fields(page: Page, cfg: AppConfig, job_location: str = "") -
                 match = group.find(r => r.value.includes(target) || r.label.includes(target));
             } else if (/certified|certificat|certification|\bcert\b/.test(ctx)) {
                 match = group.find(r => /^yes$|\byes\b/i.test(r.label) || /^yes$|\byes\b/i.test(r.value));
+            } else if (/mil.*spouse|mil.*partner/.test(ctx)) {
+                match = group.find(r => /not\s*a\s*military|non-military|not\s*a\s*spouse|no\b|not\b/i.test(r.label) || /not\s*a\s*military|non-military|not\s*a\s*spouse|no\b|not\b/i.test(r.value));
             } else if (/current|present|home/.test(ctx) && (ctx.includes("location") || ctx.includes("city"))) {
                 const target = (config.currentCity || "").toLowerCase();
                 if (target) match = group.find(r => r.value.includes(target) || r.label.includes(target));
             } else if (ctx.includes("location") || ctx.includes("city") || ctx.includes("remote")) {
                 const target = (config.preferredCity || prefLocs[0] || "").toLowerCase();
                 if (target) match = group.find(r => r.value.includes(target) || r.label.includes(target));
+            } else if (/experience|years|exp/.test(ctx)) {
+                const candidates = group.filter(r => !/no experience|fresher|\b0\b|\bzero\b/i.test(r.label) && !/no experience|fresher|\b0\b|\bzero\b/i.test(r.value));
+                match = candidates.find(r => /\b4\b|3.*5|3\s*-\s*5|3\s*to\s*5/.test(r.label) || /\b4\b|3.*5|3\s*-\s*5|3\s*to\s*5/.test(r.value)) ||
+                        candidates.find(r => /[34]/.test(r.label) || /[34]/.test(r.value)) ||
+                        candidates[0] || group[0];
             }
 
             if (match) {
@@ -513,7 +527,7 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
             }""")
 
             if has_radios:
-                chosen = await page.evaluate("""(config) => {
+                chosen = await page.evaluate(r"""(config) => {
                     const q = config.question;
                     const af = config.af;
                     const expMap = config.expMap;
@@ -534,7 +548,7 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                     } else if (/immediate|joiner|notice|join/.test(q)) {
                         // Find closest option to notice period (default 15 days)
                         const noticeStr = af.notice_period || '15 days';
-                        const targetDays = parseInt(noticeStr.match(/\\d+/)?.[0] || '15');
+                        const targetDays = parseInt(noticeStr.match(/\d+/)?.[0] || '15');
                         let best = null, bestDiff = 999;
                         options.forEach(o => {
                             const n = parseInt(o.value);
@@ -548,7 +562,7 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                         const target = (af.gender || 'male').toLowerCase();
                         chosen = options.find(o => o.label.includes(target)) || options[0];
                     } else if (/relocat|willing to move|shift to|open.*relocat/.test(q)) {
-                        chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
+                        chosen = options.find(o => /^yes$|\byes\b/i.test(o.text)) || options[0];
                     } else if (/current.*(location|city)|present.*(location|city)|home.*(location|city)|where.*based|where.*live|residing/.test(q)) {
                         const target = (config.currentCity || '').toLowerCase();
                         if (target) chosen = options.find(o => o.label.includes(target));
@@ -580,18 +594,42 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                                 target = parseFloat(af.total_experience || '4');
                             }
                         }
+
+                        // Helper to parse years from option labels/values
+                        function parseYears(label) {
+                            const l = label.toLowerCase();
+                            if (/no experience|fresher|\b0\b|\bzero\b/.test(l)) return 0;
+                            let m = l.match(/(\d+)\s*(?:-|to)\s*(\d+)/);
+                            if (m) return (parseFloat(m[1]) + parseFloat(m[2])) / 2;
+                            m = l.match(/(\d+)\s*\+/);
+                            if (m) return parseFloat(m[1]) + 0.5;
+                            m = l.match(/(\d+)/);
+                            if (m) return parseFloat(m[1]);
+                            return -1;
+                        }
+
                         let best = null, bestDiff = 999;
-                        options.forEach(o => {
-                            const n = parseFloat(o.value);
-                            if (!isNaN(n) && Math.abs(n - target) < bestDiff) { bestDiff = Math.abs(n - target); best = o; }
+                        // Filter out fresher options to avoid falling back to "No experience"
+                        let candidates = options.filter(o => !/no experience|fresher|\b0\b|\bzero\b/i.test(o.label));
+                        if (candidates.length === 0) candidates = options;
+
+                        candidates.forEach(o => {
+                            let n = parseYears(o.label);
+                            if (n === -1) n = parseFloat(o.value);
+                            if (!isNaN(n) && n >= 0 && Math.abs(n - target) < bestDiff) {
+                                bestDiff = Math.abs(n - target);
+                                best = o;
+                            }
                         });
-                        chosen = best;
+                        chosen = best || candidates[0];
                     } else if (/\bbond\b|service agreement|year bond|night shift|us shift|rotational|travel|deputation/.test(q)) {
-                        chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
+                        chosen = options.find(o => /^yes$|\byes\b/i.test(o.label)) || options[0];
                     } else if (/offer.*hand|in.*hand.*offer|any.*offer|active offer|other offer|counter.*offer|competing offer/.test(q)) {
-                        chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
+                        chosen = options.find(o => /^yes$|\byes\b/i.test(o.label)) || options[0];
                     } else if (/certified|certificat|certification|\bcert\b/.test(q)) {
-                        chosen = options.find(o => /^yes\b|\byes\b/.test(o.label)) || options[0];
+                        chosen = options.find(o => /^yes$|\byes\b/i.test(o.label)) || options[0];
+                    } else if (/mil.*spouse|mil.*partner/.test(q)) {
+                        chosen = options.find(o => /not\s*a\s*military|non-military|not\s*a\s*spouse|no\b|not\b/i.test(o.label)) || options[0];
                     }
                     if (!chosen) {
                         chosen = options.find(o => o.label.includes('skip')) || options[0];
@@ -715,6 +753,8 @@ async def _apply_naukri(page: Page, cfg: AppConfig, cover_note: str) -> dict[str
                     value = "Yes"
                 elif _re.search(r"certified|certification|certificate|certificates|\bcert\b", question):
                     value = af.get("certifications", "AWS solutions architect associate and AWS cloudops enginerr associate and AWS AI Practitioner")
+                elif _re.search(r"mil.*spouse|mil.*partner", question):
+                    value = "No"
                 elif _re.search(r"do you|are you|have you|can you|will you|would you", question):
                     value = "Yes"
 
