@@ -192,6 +192,23 @@ Edit `~/.kiro/settings/mcp.json`:
 }
 ```
 
+### Antigravity IDE
+
+Edit `C:\Users\kunal.mamodiya\.gemini\antigravity-ide\mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "job-apply-mcp": {
+      "command": "C:\\Users\\kunal.mamodiya\\Desktop\\job-apply-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\kunal.mamodiya\\Desktop\\job-apply-mcp\\server.py"
+      ]
+    }
+  }
+}
+```
+And session, application.db and personalized config zip is uploaded on Drive
 Then in chat: *"Search Naukri for DevOps jobs and apply to the top 10"*
 
 ---
