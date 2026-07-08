@@ -67,6 +67,7 @@ class CandidateProfile:
         "Cloud DevOps Engineer",
         "Cloud Engineer",
         "AWS Cloud Engineer",
+        "AWS DevOps Engineer",
         "AI Platform Engineer",
     )
     default_search_keywords: tuple[str, ...] = (
@@ -74,6 +75,7 @@ class CandidateProfile:
         "Senior DevOps Engineer",
         "Platform Engineer",
         "AWS Cloud Engineer",
+        "AWS DevOps Engineer",
         "Site Reliability Engineer",
         "Cloud DevOps AI",
     )
