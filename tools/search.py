@@ -99,7 +99,7 @@ def _naukri_url(keywords: str, location: str, experience: int) -> str:
     loc_slug = location.lower().replace(" ", "-").replace(",", "")
     # Use experience range: e.g. 3 years → search 3-5 year range
     exp_min = experience
-    exp_max = experience + 2
+    exp_max = experience + 3
     return (
         f"https://www.naukri.com/{kw_slug}-jobs-in-{loc_slug}"
         f"?experience={exp_min}&nignbelow_salary=0&salary=0&salaryType=0"
